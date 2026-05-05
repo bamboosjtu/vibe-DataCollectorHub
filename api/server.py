@@ -19,6 +19,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import (
+    BackgroundTasks,
     Body,
     FastAPI,
     HTTPException,
@@ -27,6 +28,7 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 from contextlib import asynccontextmanager
@@ -145,10 +147,18 @@ class IngestionResponse(BaseModel):
 
 
 class ProcessingRunRequest(BaseModel):
-    """Manual processing run request."""
+    """Manual foreground/debug processing run request."""
 
     dataset_key: str = "station"
     mode: str = "incremental"
+
+
+class ProcessingJobRequest(BaseModel):
+    """Background processing job request."""
+
+    dataset_key: str
+    mode: str = "incremental"
+    batch_size: int = 1000
 
 
 # MCP Models
@@ -230,6 +240,19 @@ app = FastAPI(
     description="REST API for Data Collector Hub v1.0",
     version="1.0.0",
     lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:4173",
+        "http://127.0.0.1:4173",
+    ],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -463,7 +486,7 @@ async def ingest_source_events(body: Any = Body(...)):
 
 @app.post("/processing/v1/run")
 async def run_processing(request: ProcessingRunRequest):
-    """Run a foreground normalizer pass for a supported dataset."""
+    """Run a foreground/debug normalizer pass for a supported dataset."""
     supported = supported_datasets()
     if request.dataset_key not in supported:
         raise HTTPException(
@@ -474,6 +497,153 @@ async def run_processing(request: ProcessingRunRequest):
             },
         )
     return NormalizerRunner(store).run(dataset_key=request.dataset_key, mode=request.mode)
+
+
+def _run_processing_job(
+    *,
+    job_id: str,
+    dataset_key: str,
+    mode: str,
+    batch_size: int,
+) -> None:
+    """Run a processing job using a fresh SQLiteStore connection."""
+    job_store = SQLiteStore(db_path=DEFAULT_DB_PATH)
+    try:
+        job_store.init_schema()
+        job_store.mark_processing_job_running(job_id)
+        result = NormalizerRunner(job_store).run(
+            dataset_key=dataset_key,
+            mode=mode,
+            batch_size=batch_size,
+        )
+        job_store.mark_processing_job_succeeded(job_id, result)
+    except Exception as exc:
+        try:
+            job_store.mark_processing_job_failed(job_id, str(exc))
+        except Exception:
+            pass
+    finally:
+        job_store.close()
+
+
+@app.post("/processing/v1/jobs", status_code=202)
+async def create_processing_job(
+    request: ProcessingJobRequest,
+    background_tasks: BackgroundTasks,
+):
+    """Queue a background normalizer job for a supported dataset."""
+    supported = supported_datasets()
+    if request.dataset_key not in supported:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": f"unsupported dataset_key: {request.dataset_key}",
+                "supported_datasets": supported,
+            },
+        )
+    if request.mode not in {"incremental", "full"}:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": f"unsupported processing mode: {request.mode}"},
+        )
+    if request.batch_size <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "batch_size must be greater than 0"},
+        )
+
+    active_job = store.get_active_processing_job(request.dataset_key)
+    if active_job:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": f"processing job already active for dataset_key: {request.dataset_key}",
+                "job": active_job,
+            },
+        )
+
+    job_id = f"proc_{uuid.uuid4().hex}"
+    job = store.create_processing_job(
+        job_id=job_id,
+        dataset_key=request.dataset_key,
+        mode=request.mode,
+        batch_size=request.batch_size,
+    )
+    background_tasks.add_task(
+        _run_processing_job,
+        job_id=job_id,
+        dataset_key=request.dataset_key,
+        mode=request.mode,
+        batch_size=request.batch_size,
+    )
+    return job
+
+
+@app.get("/processing/v1/jobs/{job_id}")
+async def get_processing_job(job_id: str):
+    """Get processing job status."""
+    job = store.get_processing_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"processing job not found: {job_id}")
+    return job
+
+
+@app.post("/processing/v1/run-monitor")
+async def run_monitor_processing():
+    """Run supported normalizers for DCP monitor datasets."""
+    try:
+        runtime_config = store.get_plugin_runtime_config("dcp")["config"]
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"failed to load dcp runtime config: {exc}")
+
+    monitor_datasets = runtime_config.get("monitor_datasets") or []
+    if not isinstance(monitor_datasets, list):
+        raise HTTPException(status_code=400, detail="dcp monitor_datasets must be a list")
+
+    supported = supported_datasets()
+    supported_set = set(supported)
+    runner = NormalizerRunner(store)
+    results: dict[str, Any] = {}
+    processed = 0
+    skipped = 0
+
+    for dataset_key in monitor_datasets:
+        dataset_key = str(dataset_key)
+        if dataset_key not in supported_set:
+            skipped += 1
+            results[dataset_key] = {
+                "status": "skipped",
+                "reason": "unsupported",
+            }
+            continue
+
+        processed += 1
+        results[dataset_key] = {
+            "status": "processed",
+            "result": runner.run(dataset_key=dataset_key),
+        }
+
+    return {
+        "plugin_id": "dcp",
+        "monitor_datasets": [str(dataset_key) for dataset_key in monitor_datasets],
+        "supported_datasets": supported,
+        "results": results,
+        "summary": {
+            "processed": processed,
+            "skipped": skipped,
+        },
+    }
+
+
+@app.get("/api/v1/sandbox/dates")
+async def get_sandbox_dates():
+    """Return available sandbox work point dates for Monitor timeline mode."""
+    dates = store.list_canonical_entity_dates("work_point")
+    return {
+        "dates": dates,
+        "latest_date": dates[-1] if dates else None,
+        "count": len(dates),
+    }
 
 
 @app.get("/api/v1/sandbox/map/skeleton")

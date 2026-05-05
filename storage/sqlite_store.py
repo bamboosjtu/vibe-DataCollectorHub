@@ -124,6 +124,20 @@ CREATE TABLE IF NOT EXISTS normalizer_state (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Foreground-submitted background processing jobs.
+CREATE TABLE IF NOT EXISTS processing_jobs (
+    job_id TEXT PRIMARY KEY,
+    dataset_key TEXT NOT NULL,
+    mode TEXT NOT NULL DEFAULT 'incremental',
+    batch_size INTEGER NOT NULL DEFAULT 1000,
+    status TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    started_at TIMESTAMP,
+    finished_at TIMESTAMP,
+    result TEXT,
+    error TEXT
+);
+
 -- Normalized data table (semi-structured layer)
 CREATE TABLE IF NOT EXISTS normalized_data (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -265,6 +279,12 @@ class SQLiteStore:
             self._ensure_column(conn, "canonical_entities", "latest_source_record_hash", "TEXT")
             self._ensure_column(conn, "canonical_entities", "source_refs", "TEXT NOT NULL DEFAULT '[]'")
             self._ensure_column(conn, "normalizer_state", "normalizer_version", "TEXT")
+            self._ensure_column(conn, "processing_jobs", "mode", "TEXT NOT NULL DEFAULT 'incremental'")
+            self._ensure_column(conn, "processing_jobs", "batch_size", "INTEGER NOT NULL DEFAULT 1000")
+            self._ensure_column(conn, "processing_jobs", "started_at", "TIMESTAMP")
+            self._ensure_column(conn, "processing_jobs", "finished_at", "TIMESTAMP")
+            self._ensure_column(conn, "processing_jobs", "result", "TEXT")
+            self._ensure_column(conn, "processing_jobs", "error", "TEXT")
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_canonical_entities_type ON canonical_entities(entity_type)"
             )
@@ -273,6 +293,9 @@ class SQLiteStore:
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_canonical_entities_date ON canonical_entities(entity_type, entity_date)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_processing_jobs_dataset_status ON processing_jobs(dataset_key, status)"
             )
             conn.commit()
             print(f"[SQLiteStore] Schema initialized at {self.db_path}")
@@ -1057,6 +1080,22 @@ class SQLiteStore:
         finally:
             conn.close()
 
+    def list_canonical_entity_dates(self, entity_type: str) -> List[str]:
+        """Return distinct non-empty canonical entity dates in ascending order."""
+        conn = self._get_connection()
+        try:
+            cursor = conn.execute(
+                """
+                SELECT DISTINCT entity_date FROM canonical_entities
+                WHERE entity_type = ? AND entity_date IS NOT NULL AND entity_date != ''
+                ORDER BY entity_date ASC
+                """,
+                (entity_type,),
+            )
+            return [row["entity_date"] for row in cursor.fetchall()]
+        finally:
+            conn.close()
+
     # --- Normalizer state operations ---
 
     def get_normalizer_state(self, dataset_key: str) -> Dict[str, Any]:
@@ -1102,6 +1141,123 @@ class SQLiteStore:
                 (dataset_key, last_raw_event_id, normalizer_version, datetime.now()),
             )
             conn.commit()
+        finally:
+            conn.close()
+
+    # --- Processing job operations ---
+
+    def _deserialize_processing_job(self, row: sqlite3.Row | None) -> Optional[Dict[str, Any]]:
+        if not row:
+            return None
+        job = dict(row)
+        job["result"] = json.loads(job["result"]) if job.get("result") else None
+        return job
+
+    def create_processing_job(
+        self,
+        *,
+        job_id: str,
+        dataset_key: str,
+        mode: str = "incremental",
+        batch_size: int = 1000,
+    ) -> Dict[str, Any]:
+        """Create a queued processing job."""
+        conn = self._get_connection()
+        try:
+            conn.execute(
+                """
+                INSERT INTO processing_jobs (
+                    job_id, dataset_key, mode, batch_size, status, created_at
+                )
+                VALUES (?, ?, ?, ?, 'queued', ?)
+                """,
+                (job_id, dataset_key, mode, batch_size, datetime.now()),
+            )
+            conn.commit()
+            job = self.get_processing_job(job_id)
+            if job is None:
+                raise RuntimeError(f"failed to create processing job: {job_id}")
+            return job
+        finally:
+            conn.close()
+
+    def mark_processing_job_running(self, job_id: str) -> None:
+        conn = self._get_connection()
+        try:
+            conn.execute(
+                """
+                UPDATE processing_jobs
+                SET status = 'running', started_at = ?
+                WHERE job_id = ?
+                """,
+                (datetime.now(), job_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def mark_processing_job_succeeded(
+        self, job_id: str, result: Dict[str, Any]
+    ) -> None:
+        conn = self._get_connection()
+        try:
+            conn.execute(
+                """
+                UPDATE processing_jobs
+                SET status = 'succeeded', finished_at = ?, result = ?, error = NULL
+                WHERE job_id = ?
+                """,
+                (
+                    datetime.now(),
+                    json.dumps(result, ensure_ascii=False, default=str),
+                    job_id,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def mark_processing_job_failed(self, job_id: str, error: str) -> None:
+        conn = self._get_connection()
+        try:
+            conn.execute(
+                """
+                UPDATE processing_jobs
+                SET status = 'failed', finished_at = ?, error = ?
+                WHERE job_id = ?
+                """,
+                (datetime.now(), error, job_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_processing_job(self, job_id: str) -> Optional[Dict[str, Any]]:
+        conn = self._get_connection()
+        try:
+            cursor = conn.execute(
+                "SELECT * FROM processing_jobs WHERE job_id = ?",
+                (job_id,),
+            )
+            return self._deserialize_processing_job(cursor.fetchone())
+        finally:
+            conn.close()
+
+    def get_active_processing_job(
+        self, dataset_key: str
+    ) -> Optional[Dict[str, Any]]:
+        conn = self._get_connection()
+        try:
+            cursor = conn.execute(
+                """
+                SELECT * FROM processing_jobs
+                WHERE dataset_key = ? AND status IN ('queued', 'running')
+                ORDER BY created_at ASC
+                LIMIT 1
+                """,
+                (dataset_key,),
+            )
+            return self._deserialize_processing_job(cursor.fetchone())
         finally:
             conn.close()
 

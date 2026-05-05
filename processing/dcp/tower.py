@@ -1,7 +1,10 @@
 """DCP tower normalizer."""
 
 from datetime import datetime
+import math
 from typing import Any
+
+from processing.dcp.geo import _is_hunan_coordinate
 
 
 def _parse_epoch(timestamp: Any) -> float | None:
@@ -13,9 +16,10 @@ def _parse_epoch(timestamp: Any) -> float | None:
 
 def _float_value(value: Any) -> float | None:
     try:
-        return float(value)
+        parsed = float(value)
     except (TypeError, ValueError):
         return None
+    return parsed if math.isfinite(parsed) else None
 
 
 def normalize_tower(
@@ -56,6 +60,8 @@ def normalize_tower(
     latitude = _float_value(raw.get("latitudeEdit"))
     if longitude is None or latitude is None:
         return None, "invalid longitudeEdit/latitudeEdit"
+    if not _is_hunan_coordinate(longitude, latitude):
+        return None, "coordinate outside hunan range"
 
     attributes = {
         "tower_id": tower_id,

@@ -1,7 +1,10 @@
 """DCP station normalizer."""
 
 from datetime import datetime
+import math
 from typing import Any
+
+from processing.dcp.geo import _is_hunan_coordinate
 
 
 def _parse_epoch(timestamp: Any) -> float | None:
@@ -9,6 +12,14 @@ def _parse_epoch(timestamp: Any) -> float | None:
         return datetime.fromisoformat(str(timestamp).replace("Z", "+00:00")).timestamp()
     except (TypeError, ValueError):
         return None
+
+
+def _float_value(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
 
 
 def normalize_station(raw_event: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
@@ -33,11 +44,12 @@ def normalize_station(raw_event: dict[str, Any]) -> tuple[dict[str, Any] | None,
     if station_identity in (None, ""):
         return None, "missing station identity"
 
-    try:
-        longitude = float(raw.get("longitude"))
-        latitude = float(raw.get("latitude"))
-    except (TypeError, ValueError):
+    longitude = _float_value(raw.get("longitude"))
+    latitude = _float_value(raw.get("latitude"))
+    if longitude is None or latitude is None:
         return None, "invalid longitude/latitude"
+    if not _is_hunan_coordinate(longitude, latitude):
+        return None, "coordinate outside hunan range"
 
     attributes = {
         "project_code": raw.get("prjCode"),

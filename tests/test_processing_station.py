@@ -35,8 +35,8 @@ def _epoch(timestamp: str) -> float:
 def _station_event(
     suffix: str = "001",
     station_id: str | None = None,
-    longitude: str = "116.391",
-    latitude: str = "39.907",
+    longitude: str = "112.9279",
+    latitude: str = "28.2147",
     collected_at: str = "2026-05-03T21:30:12+08:00",
 ) -> dict:
     station_id = station_id or f"station-{suffix}"
@@ -75,7 +75,14 @@ def _station_event(
     }
 
 
-def _daily_meeting_event(suffix: str = "001", work_date: str = "2026-05-03") -> dict:
+def _daily_meeting_event(
+    suffix: str = "001", work_date: str | int = "2026-05-03"
+) -> dict:
+    source_file_date = "2026-05-03"
+    if isinstance(work_date, str) and len(work_date) >= 10:
+        source_file_date = work_date[:10]
+    elif isinstance(work_date, int):
+        source_file_date = datetime.fromtimestamp(work_date / 1000).date().isoformat()
     return {
         "schema_version": "source_event.v1",
         "event_id": f"evt-daily-meeting-{suffix}",
@@ -91,13 +98,13 @@ def _daily_meeting_event(suffix: str = "001", work_date: str = "2026-05-03") -> 
             "raw": {
                 "id": f"meeting-{suffix}",
                 "projectName": "示例工程",
-                "toolBoxTalkLongitude": "116.391",
-                "toolBoxTalkLatitude": "39.907",
+                "toolBoxTalkLongitude": "112.9388",
+                "toolBoxTalkLatitude": "28.2282",
                 "personCount": 12,
                 "riskLevel": "medium",
                 "workStatus": "working",
                 "voltageLevel": "500kV",
-                "city": "北京",
+                "city": "长沙",
                 "workDate": work_date,
                 "rawOnly": "not exposed",
             }
@@ -111,7 +118,7 @@ def _daily_meeting_event(suffix: str = "001", work_date: str = "2026-05-03") -> 
             "raw_data_index": 0,
             "record_index": 0,
             "record_path": "raw_data[0].records[0]",
-            "source_file": f"safePages/meetingListAdmin/{suffix}.json",
+            "source_file": f"safePages/daily_meeting/{source_file_date}.json",
         },
     }
 
@@ -126,8 +133,8 @@ def _tower_event(
         "biddingSectionCode": "BS-001",
         "towerNo": f"T-{suffix}",
         "upstreamTowerNo": "T-000",
-        "longitudeEdit": "117.125",
-        "latitudeEdit": "40.125",
+        "longitudeEdit": "112.9451",
+        "latitudeEdit": "28.2311",
         "longitude": "0",
         "latitude": "0",
         "towerType": "linear",
@@ -184,8 +191,8 @@ def test_station_source_event_to_sandbox_skeleton_flow():
     assert entity["attributes"]["project_code"] == "PRJ-001"
     assert entity["attributes"]["single_project_code"] == "SP-001"
     assert entity["attributes"]["dcp_coordinate_id"] == "station-001"
-    assert entity["attributes"]["longitude"] == 116.391
-    assert entity["attributes"]["latitude"] == 39.907
+    assert entity["attributes"]["longitude"] == 112.9279
+    assert entity["attributes"]["latitude"] == 28.2147
     assert entity["attributes"]["raw"]["extra"] == "kept in canonical raw attributes"
     assert entity["latest_source_record_hash"] == "hash-station-001"
     assert entity["source_refs"] == [
@@ -215,8 +222,8 @@ def test_station_source_event_to_sandbox_skeleton_flow():
             "id": "dcp:station:SP-001",
             "project_code": "PRJ-001",
             "single_project_code": "SP-001",
-            "longitude": 116.391,
-            "latitude": 39.907,
+            "longitude": 112.9279,
+            "latitude": 28.2147,
         }
     ]
 
@@ -245,8 +252,8 @@ def test_daily_meeting_source_event_to_work_point_and_summary():
     assert entity["entity_key"] == "dcp:work_point:2026-05-03:meeting-001"
     assert entity["entity_date"] == "2026-05-03"
     assert entity["attributes"]["project_name"] == "示例工程"
-    assert entity["attributes"]["longitude"] == 116.391
-    assert entity["attributes"]["latitude"] == 39.907
+    assert entity["attributes"]["longitude"] == 112.9388
+    assert entity["attributes"]["latitude"] == 28.2282
     assert entity["attributes"]["person_count"] == 12
     assert entity["attributes"]["raw"]["rawOnly"] == "not exposed"
 
@@ -263,13 +270,13 @@ def test_daily_meeting_source_event_to_work_point_and_summary():
         {
             "id": "dcp:work_point:2026-05-03:meeting-001",
             "project_name": "示例工程",
-            "longitude": 116.391,
-            "latitude": 39.907,
+            "longitude": 112.9388,
+            "latitude": 28.2282,
             "person_count": 12,
-            "risk_level": "medium",
+            "risk_level": "3",
             "work_status": "working",
             "voltage_level": "500kV",
-            "city": "北京",
+            "city": "长沙",
             "work_date": "2026-05-03",
         }
     ]
@@ -315,13 +322,13 @@ def test_sandbox_summary_filters_by_date_and_defaults_to_latest_date():
         {
             "id": "dcp:work_point:2026-05-03:meeting-date-1",
             "project_name": "三号作业",
-            "longitude": 116.391,
-            "latitude": 39.907,
+            "longitude": 112.9388,
+            "latitude": 28.2282,
             "person_count": 12,
-            "risk_level": "medium",
+            "risk_level": "3",
             "work_status": "working",
             "voltage_level": "500kV",
-            "city": "北京",
+            "city": "长沙",
             "work_date": "2026-05-03",
         }
     ]
@@ -330,14 +337,54 @@ def test_sandbox_summary_filters_by_date_and_defaults_to_latest_date():
     assert latest.json()["work_points"][0]["project_name"] == "四号作业"
 
 
+def test_sandbox_dates_returns_daily_meeting_dates_in_ascending_order():
+    store = _make_store()
+    client = _client(store)
+    first = _daily_meeting_event("date-list-1", work_date="2026-05-04")
+    second = _daily_meeting_event("date-list-2", work_date="2026-05-03")
+    third = _daily_meeting_event("date-list-3", work_date="2026-05-04")
+    first["payload"]["raw"]["id"] = "meeting-date-list-1"
+    second["payload"]["raw"]["id"] = "meeting-date-list-2"
+    third["payload"]["raw"]["id"] = "meeting-date-list-3"
+    store.save_raw_event(first, dataset_key="daily_meeting")
+    store.save_raw_event(second, dataset_key="daily_meeting")
+    store.save_raw_event(third, dataset_key="daily_meeting")
+    NormalizerRunner(store).run("daily_meeting")
+
+    response = client.get("/api/v1/sandbox/dates")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "dates": ["2026-05-03", "2026-05-04"],
+        "latest_date": "2026-05-04",
+        "count": 2,
+    }
+
+
+def test_sandbox_dates_returns_empty_when_no_work_points_exist():
+    store = _make_store()
+    client = _client(store)
+    store.save_raw_event(_station_event("dates-station-only"), dataset_key="station")
+    NormalizerRunner(store).run("station")
+
+    response = client.get("/api/v1/sandbox/dates")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "dates": [],
+        "latest_date": None,
+        "count": 0,
+    }
+
+
 def test_daily_meeting_maps_current_monitor_fields():
     store = _make_store()
     event = _daily_meeting_event("field-map")
     raw = event["payload"]["raw"]
-    raw["currentConstrHeadcount"] = 18
+    raw["currentConstrHeadcount"] = "18"
     raw["reAssessmentRiskLevel"] = "high"
     raw["currentConstructionStatus"] = "paused"
-    raw["buildUnitName"] = "海淀"
+    raw["buildUnitName"] = "长沙"
     store.save_raw_event(event, dataset_key="daily_meeting")
 
     result = NormalizerRunner(store).run("daily_meeting")
@@ -345,9 +392,275 @@ def test_daily_meeting_maps_current_monitor_fields():
     entity = store.list_canonical_entities(entity_type="work_point")[0]
     assert result["processed"] == 1
     assert entity["attributes"]["person_count"] == 18
-    assert entity["attributes"]["risk_level"] == "high"
+    assert entity["attributes"]["risk_level"] == "2"
     assert entity["attributes"]["work_status"] == "paused"
-    assert entity["attributes"]["city"] == "海淀"
+    assert entity["attributes"]["city"] == "长沙"
+
+
+def test_daily_meeting_normalizes_invalid_count_and_unknown_values():
+    store = _make_store()
+    event = _daily_meeting_event("stable-values")
+    raw = event["payload"]["raw"]
+    raw["currentConstrHeadcount"] = "not-a-number"
+    raw["reAssessmentRiskLevel"] = "very risky"
+    raw["currentConstructionStatus"] = "strange status"
+    store.save_raw_event(event, dataset_key="daily_meeting")
+
+    result = NormalizerRunner(store).run("daily_meeting")
+
+    entity = store.list_canonical_entities(entity_type="work_point")[0]
+    assert result["processed"] == 1
+    assert entity["attributes"]["person_count"] == 0
+    assert entity["attributes"]["risk_level"] == "unknown"
+    assert entity["attributes"]["work_status"] == "unknown"
+
+
+def test_daily_meeting_normalizes_datetime_work_date():
+    store = _make_store()
+    event = _daily_meeting_event("datetime-date", work_date="2026-05-03 18:20:30")
+    store.save_raw_event(event, dataset_key="daily_meeting")
+
+    result = NormalizerRunner(store).run("daily_meeting")
+
+    entity = store.list_canonical_entities(entity_type="work_point")[0]
+    assert result["processed"] == 1
+    assert entity["entity_key"] == "dcp:work_point:2026-05-03:meeting-datetime-date"
+    assert entity["entity_date"] == "2026-05-03"
+    assert entity["attributes"]["work_date"] == "2026-05-03"
+
+
+def test_daily_meeting_normalizes_epoch_millis_work_date():
+    store = _make_store()
+    epoch_ms = int(
+        datetime.fromisoformat("2026-05-03T12:00:00+00:00").timestamp() * 1000
+    )
+    event = _daily_meeting_event("epoch-date", work_date=epoch_ms)
+    store.save_raw_event(event, dataset_key="daily_meeting")
+
+    result = NormalizerRunner(store).run("daily_meeting")
+
+    entity = store.list_canonical_entities(entity_type="work_point")[0]
+    assert result["processed"] == 1
+    assert entity["entity_date"] == "2026-05-03"
+    assert entity["attributes"]["work_date"] == "2026-05-03"
+
+
+def test_daily_meeting_numeric_risk_levels_are_stable_values():
+    store = _make_store()
+    for risk_level in [1, "2", 3, "4"]:
+        event = _daily_meeting_event(f"risk-{risk_level}")
+        event["payload"]["raw"]["riskLevel"] = risk_level
+        store.save_raw_event(event, dataset_key="daily_meeting")
+
+    result = NormalizerRunner(store).run("daily_meeting")
+
+    entities = store.list_canonical_entities(entity_type="work_point", limit=10)
+    assert result["processed"] == 4
+    assert {entity["attributes"]["risk_level"] for entity in entities} == {
+        "1",
+        "2",
+        "3",
+        "4",
+    }
+
+
+def test_daily_meeting_named_risk_levels_follow_monitor_scale():
+    store = _make_store()
+    cases = {
+        "critical": "1",
+        "重大风险": "1",
+        "特高风险": "1",
+        "high": "2",
+        "高风险": "2",
+        "medium": "3",
+        "中风险": "3",
+        "low": "4",
+        "低风险": "4",
+        "一般风险": "4",
+    }
+    for source_value in cases:
+        event = _daily_meeting_event(f"risk-name-{source_value}")
+        event["payload"]["raw"]["riskLevel"] = source_value
+        store.save_raw_event(event, dataset_key="daily_meeting")
+
+    result = NormalizerRunner(store).run("daily_meeting")
+
+    entities = store.list_canonical_entities(entity_type="work_point", limit=20)
+    risk_by_id = {
+        entity["entity_key"].split(":")[-1]: entity["attributes"]["risk_level"]
+        for entity in entities
+    }
+    assert result["processed"] == len(cases)
+    for source_value, expected in cases.items():
+        assert risk_by_id[f"meeting-risk-name-{source_value}"] == expected
+
+
+def test_invalid_coordinates_are_skipped_by_dcp_normalizers():
+    store = _make_store()
+    daily = _daily_meeting_event("bad-daily-coordinate")
+    tower = _tower_event("bad-tower-coordinate")
+    station = _station_event("bad-station-coordinate")
+    daily["payload"]["raw"]["toolBoxTalkLongitude"] = "nan"
+    tower["payload"]["raw"]["longitudeEdit"] = "nan"
+    station["payload"]["raw"]["longitude"] = "nan"
+    store.save_raw_event(daily, dataset_key="daily_meeting")
+    store.save_raw_event(tower, dataset_key="tower")
+    store.save_raw_event(station, dataset_key="station")
+
+    daily_result = NormalizerRunner(store).run("daily_meeting")
+    tower_result = NormalizerRunner(store).run("tower")
+    station_result = NormalizerRunner(store).run("station")
+
+    assert daily_result["processed"] == 0
+    assert daily_result["skipped"] == 1
+    assert "invalid toolBoxTalkLongitude/toolBoxTalkLatitude" in daily_result["errors"][0]
+    assert tower_result["processed"] == 0
+    assert tower_result["skipped"] == 1
+    assert "invalid longitudeEdit/latitudeEdit" in tower_result["errors"][0]
+    assert station_result["processed"] == 0
+    assert station_result["skipped"] == 1
+    assert "invalid longitude/latitude" in station_result["errors"][0]
+
+
+def test_non_hunan_coordinates_do_not_reach_sandbox_apis():
+    store = _make_store()
+    client = _client(store)
+    daily = _daily_meeting_event("outside-hunan", work_date="2026-05-03")
+    tower = _tower_event("outside-hunan")
+    station = _station_event("outside-hunan")
+    daily["payload"]["raw"]["toolBoxTalkLongitude"] = "116.391"
+    daily["payload"]["raw"]["toolBoxTalkLatitude"] = "39.907"
+    tower["payload"]["raw"]["longitudeEdit"] = "116.391"
+    tower["payload"]["raw"]["latitudeEdit"] = "39.907"
+    station["payload"]["raw"]["longitude"] = "116.391"
+    station["payload"]["raw"]["latitude"] = "39.907"
+
+    ingestion = client.post(
+        "/ingestion/v1/events", json={"events": [daily, tower, station]}
+    )
+    assert ingestion.status_code == 200
+    assert ingestion.json()["accepted"] == 3
+
+    daily_result = NormalizerRunner(store).run("daily_meeting")
+    tower_result = NormalizerRunner(store).run("tower")
+    station_result = NormalizerRunner(store).run("station")
+
+    assert daily_result["processed"] == 0
+    assert tower_result["processed"] == 0
+    assert station_result["processed"] == 0
+    assert "coordinate outside hunan range" in daily_result["errors"][0]
+    assert "coordinate outside hunan range" in tower_result["errors"][0]
+    assert "coordinate outside hunan range" in station_result["errors"][0]
+    assert client.get("/api/v1/sandbox/map/summary?date=2026-05-03").json()[
+        "work_points"
+    ] == []
+    skeleton = client.get("/api/v1/sandbox/map/skeleton").json()
+    assert skeleton["stations"] == []
+    assert skeleton["towers"] == []
+
+
+def test_strict_hunan_boundary_filters_formerly_loose_coordinates():
+    store = _make_store()
+    client = _client(store)
+    daily = _daily_meeting_event("loose-longitude", work_date="2026-05-03")
+    tower = _tower_event("loose-latitude")
+    station = _station_event("loose-station")
+    daily["payload"]["raw"]["toolBoxTalkLongitude"] = "108.2"
+    daily["payload"]["raw"]["toolBoxTalkLatitude"] = "28.0"
+    tower["payload"]["raw"]["longitudeEdit"] = "112.0"
+    tower["payload"]["raw"]["latitudeEdit"] = "30.8"
+    station["payload"]["raw"]["longitude"] = "108.2"
+    station["payload"]["raw"]["latitude"] = "28.0"
+
+    ingestion = client.post(
+        "/ingestion/v1/events", json={"events": [daily, tower, station]}
+    )
+    assert ingestion.status_code == 200
+    assert ingestion.json()["accepted"] == 3
+
+    daily_result = NormalizerRunner(store).run("daily_meeting")
+    tower_result = NormalizerRunner(store).run("tower")
+    station_result = NormalizerRunner(store).run("station")
+
+    assert daily_result["processed"] == 0
+    assert tower_result["processed"] == 0
+    assert station_result["processed"] == 0
+    assert "coordinate outside hunan range" in daily_result["errors"][0]
+    assert "coordinate outside hunan range" in tower_result["errors"][0]
+    assert "coordinate outside hunan range" in station_result["errors"][0]
+    assert client.get("/api/v1/sandbox/map/summary?date=2026-05-03").json()[
+        "work_points"
+    ] == []
+    skeleton = client.get("/api/v1/sandbox/map/skeleton").json()
+    assert skeleton["stations"] == []
+    assert skeleton["towers"] == []
+
+
+def test_downloader_realistic_source_events_feed_sandbox_apis():
+    store = _make_store()
+    client = _client(store)
+    daily = _daily_meeting_event("real-daily", work_date="2026-05-05")
+    daily["payload"]["raw"].update(
+        {
+            "projectName": "湖南特高压作业点",
+            "toolBoxTalkLongitude": "112.9388",
+            "toolBoxTalkLatitude": "28.2282",
+            "currentConstrHeadcount": "26",
+            "reAssessmentRiskLevel": "高",
+            "currentConstructionStatus": "施工中",
+            "buildUnitName": "长沙",
+        }
+    )
+    tower = _tower_event("real-tower")
+    tower["payload"]["raw"].update(
+        {
+            "id": "TW-HN-001",
+            "singleProjectCode": "SP-HN-001",
+            "biddingSectionCode": "BD-HN-001",
+            "towerNo": "N101",
+            "longitudeEdit": "112.9451",
+            "latitudeEdit": "28.2311",
+        }
+    )
+    station = _station_event(
+        suffix="real-station",
+        station_id="ST-HN-001",
+        longitude="112.9279",
+        latitude="28.2147",
+    )
+
+    ingestion = client.post(
+        "/ingestion/v1/events",
+        json={"events": [daily, tower, station]},
+    )
+    assert ingestion.status_code == 200
+    assert ingestion.json()["accepted"] == 3
+
+    assert NormalizerRunner(store).run("daily_meeting")["processed"] == 1
+    assert NormalizerRunner(store).run("tower")["processed"] == 1
+    assert NormalizerRunner(store).run("station")["processed"] == 1
+
+    summary = client.get("/api/v1/sandbox/map/summary?date=2026-05-05")
+    skeleton = client.get("/api/v1/sandbox/map/skeleton")
+
+    assert summary.status_code == 200
+    work_point = summary.json()["work_points"][0]
+    assert work_point["project_name"] == "湖南特高压作业点"
+    assert work_point["person_count"] == 26
+    assert work_point["risk_level"] == "2"
+    assert work_point["work_status"] == "working"
+    assert work_point["city"] == "长沙"
+    assert "raw" not in work_point
+
+    assert skeleton.status_code == 200
+    body = skeleton.json()
+    assert body["meta"]["towers_count"] == 1
+    assert body["meta"]["stations_count"] == 1
+    assert body["towers"][0]["id"] == "dcp:tower:TW-HN-001"
+    assert body["towers"][0]["longitude"] == 112.9451
+    assert body["stations"][0]["longitude"] == 112.9279
+    assert "raw" not in body["towers"][0]
+    assert "raw" not in body["stations"][0]
 
 
 def test_tower_details_source_event_to_tower_canonical():
@@ -368,8 +681,8 @@ def test_tower_details_source_event_to_tower_canonical():
     entity = entities[0]
     assert entity["entity_key"] == "dcp:tower:tower-001"
     assert entity["attributes"]["tower_id"] == "tower-001"
-    assert entity["attributes"]["longitude"] == 117.125
-    assert entity["attributes"]["latitude"] == 40.125
+    assert entity["attributes"]["longitude"] == 112.9451
+    assert entity["attributes"]["latitude"] == 28.2311
     assert entity["attributes"]["raw"]["rawOnly"] == "not exposed"
 
 
@@ -429,8 +742,8 @@ def test_sandbox_skeleton_returns_towers_and_stations_without_raw():
     assert body["lines"] == []
     assert body["stations"][0]["id"] == "dcp:station:SP-001"
     assert body["towers"][0]["id"] == "dcp:tower:tower-001"
-    assert body["towers"][0]["longitude"] == 117.125
-    assert body["towers"][0]["latitude"] == 40.125
+    assert body["towers"][0]["longitude"] == 112.9451
+    assert body["towers"][0]["latitude"] == 28.2311
     assert "raw" not in body["stations"][0]
     assert "raw" not in body["towers"][0]
 
@@ -456,6 +769,169 @@ def test_processing_run_unknown_dataset_returns_supported_dataset_keys():
     detail = response.json()["detail"]
     assert detail["error"] == "unsupported dataset_key: unknown_dataset"
     assert set(detail["supported_datasets"]) == {"daily_meeting", "tower", "station"}
+
+
+def test_processing_job_create_returns_queued_job(monkeypatch):
+    store = _make_store()
+    client = _client(store)
+
+    monkeypatch.setattr(server, "_run_processing_job", lambda **_kwargs: None)
+
+    response = client.post(
+        "/processing/v1/jobs",
+        json={"dataset_key": "station", "mode": "incremental", "batch_size": 25},
+    )
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["job_id"].startswith("proc_")
+    assert body["dataset_key"] == "station"
+    assert body["mode"] == "incremental"
+    assert body["batch_size"] == 25
+    assert body["status"] == "queued"
+
+
+def test_processing_job_get_returns_job(monkeypatch):
+    store = _make_store()
+    client = _client(store)
+    monkeypatch.setattr(server, "_run_processing_job", lambda **_kwargs: None)
+
+    created = client.post(
+        "/processing/v1/jobs",
+        json={"dataset_key": "daily_meeting"},
+    ).json()
+    response = client.get(f"/processing/v1/jobs/{created['job_id']}")
+
+    assert response.status_code == 200
+    assert response.json()["job_id"] == created["job_id"]
+    assert response.json()["dataset_key"] == "daily_meeting"
+
+
+def test_processing_job_unsupported_dataset_returns_400():
+    store = _make_store()
+    client = _client(store)
+
+    response = client.post(
+        "/processing/v1/jobs",
+        json={"dataset_key": "unknown_dataset"},
+    )
+
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert detail["error"] == "unsupported dataset_key: unknown_dataset"
+    assert set(detail["supported_datasets"]) == {"daily_meeting", "tower", "station"}
+
+
+def test_processing_job_conflicts_when_dataset_already_active():
+    store = _make_store()
+    client = _client(store)
+    store.create_processing_job(
+        job_id="proc-existing",
+        dataset_key="tower",
+        mode="incremental",
+        batch_size=1000,
+    )
+
+    response = client.post(
+        "/processing/v1/jobs",
+        json={"dataset_key": "tower"},
+    )
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert "already active" in detail["error"]
+    assert detail["job"]["job_id"] == "proc-existing"
+
+
+def test_processing_run_monitor_runs_dcp_monitor_datasets_in_order(monkeypatch):
+    store = _make_store()
+    client = _client(store)
+    calls: list[str] = []
+
+    class FakeNormalizerRunner:
+        def __init__(self, _store):
+            pass
+
+        def run(self, dataset_key: str, mode: str = "incremental"):
+            calls.append(dataset_key)
+            return {
+                "processed": 0,
+                "inserted": 0,
+                "updated": 0,
+                "ignored_older": 0,
+                "skipped": 0,
+                "failed": 0,
+                "last_raw_event_id": 0,
+                "errors": [],
+            }
+
+    monkeypatch.setattr(server, "NormalizerRunner", FakeNormalizerRunner)
+
+    response = client.post("/processing/v1/run-monitor")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert calls == ["daily_meeting", "tower", "station"]
+    assert body["summary"] == {"processed": 3, "skipped": 0}
+    assert list(body["results"].keys()) == ["daily_meeting", "tower", "station"]
+
+
+def test_processing_run_monitor_skips_unsupported_monitor_dataset(monkeypatch):
+    store = _make_store()
+    store.save_plugin_runtime_config(
+        "dcp",
+        {"monitor_datasets": ["daily_meeting", "line_section", "year_progress"]},
+    )
+    client = _client(store)
+    calls: list[str] = []
+
+    class FakeNormalizerRunner:
+        def __init__(self, _store):
+            pass
+
+        def run(self, dataset_key: str, mode: str = "incremental"):
+            calls.append(dataset_key)
+            return {"processed": 0, "skipped": 0, "failed": 0, "errors": []}
+
+    monkeypatch.setattr(server, "NormalizerRunner", FakeNormalizerRunner)
+
+    response = client.post("/processing/v1/run-monitor")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert calls == ["daily_meeting"]
+    assert body["results"]["line_section"] == {
+        "status": "skipped",
+        "reason": "unsupported",
+    }
+    assert body["results"]["year_progress"] == {
+        "status": "skipped",
+        "reason": "unsupported",
+    }
+    assert body["summary"] == {"processed": 1, "skipped": 2}
+
+
+def test_processing_run_monitor_default_does_not_run_line_or_year(monkeypatch):
+    store = _make_store()
+    client = _client(store)
+    calls: list[str] = []
+
+    class FakeNormalizerRunner:
+        def __init__(self, _store):
+            pass
+
+        def run(self, dataset_key: str, mode: str = "incremental"):
+            calls.append(dataset_key)
+            return {"processed": 0, "skipped": 0, "failed": 0, "errors": []}
+
+    monkeypatch.setattr(server, "NormalizerRunner", FakeNormalizerRunner)
+
+    response = client.post("/processing/v1/run-monitor")
+
+    assert response.status_code == 200
+    assert calls == ["daily_meeting", "tower", "station"]
+    assert "line_section" not in response.json()["results"]
+    assert "year_progress" not in response.json()["results"]
 
 
 def test_station_entity_key_prefers_single_project_code():
@@ -505,15 +981,15 @@ def test_older_station_raw_event_does_not_overwrite_newer_current_entity():
     newer = _station_event(
         suffix="newer",
         station_id="station-versioned",
-        longitude="120.5",
-        latitude="30.5",
+        longitude="113.1",
+        latitude="28.5",
         collected_at="2026-05-03T22:30:12+08:00",
     )
     older = _station_event(
         suffix="older",
         station_id="station-versioned",
-        longitude="100.5",
-        latitude="20.5",
+        longitude="112.8",
+        latitude="27.9",
         collected_at="2026-05-03T21:30:12+08:00",
     )
     store.save_raw_event(newer, dataset_key="station")
@@ -527,8 +1003,8 @@ def test_older_station_raw_event_does_not_overwrite_newer_current_entity():
     entity = entities[0]
     assert entity["latest_collected_at"] == newer["collected_at"]
     assert entity["latest_source_record_hash"] == newer["source_record_hash"]
-    assert entity["attributes"]["longitude"] == 120.5
-    assert entity["attributes"]["latitude"] == 30.5
+    assert entity["attributes"]["longitude"] == 113.1
+    assert entity["attributes"]["latitude"] == 28.5
     assert result["inserted"] == 1
     assert result["ignored_older"] == 1
 
@@ -552,7 +1028,7 @@ def test_canonical_upsert_compares_latest_collected_at_epoch_not_strings():
                 "source_record_key": "dcp:station:timezone-old",
             }
         ],
-        attributes={"longitude": 116.0, "latitude": 39.0},
+        attributes={"longitude": 112.6, "latitude": 28.0},
     )
 
     status = store.upsert_canonical_entity(
@@ -572,14 +1048,14 @@ def test_canonical_upsert_compares_latest_collected_at_epoch_not_strings():
                 "source_record_key": "dcp:station:timezone-new",
             }
         ],
-        attributes={"longitude": 117.0, "latitude": 40.0},
+        attributes={"longitude": 113.0, "latitude": 28.6},
     )
 
     entity = store.list_canonical_entities(entity_type="station", dataset_key="station")[0]
     assert status == "updated"
     assert entity["latest_collected_at"] == "2026-05-03T09:00:00Z"
     assert entity["latest_source_record_hash"] == "hash-timezone-new"
-    assert entity["attributes"]["longitude"] == 117.0
+    assert entity["attributes"]["longitude"] == 113.0
 
 
 def test_incremental_mode_second_run_does_not_reprocess_raw_events():
@@ -801,7 +1277,7 @@ def test_incoming_missing_latest_collected_at_does_not_overwrite_current_entity(
         latest_collected_at_epoch=_epoch("2026-05-03T22:30:12+08:00"),
         latest_source_record_hash="hash-current",
         source_refs=[source_ref],
-        attributes={"longitude": 120.5, "latitude": 30.5},
+        attributes={"longitude": 113.2, "latitude": 28.5},
     )
 
     store.upsert_canonical_entity(
@@ -821,14 +1297,14 @@ def test_incoming_missing_latest_collected_at_does_not_overwrite_current_entity(
                 "source_record_key": "dcp:station:missing-time",
             }
         ],
-        attributes={"longitude": 100.5, "latitude": 20.5},
+        attributes={"longitude": 112.2, "latitude": 27.5},
     )
 
     entity = store.list_canonical_entities(entity_type="station", dataset_key="station")[0]
     assert entity["latest_collected_at"] == "2026-05-03T22:30:12+08:00"
     assert entity["latest_source_record_hash"] == "hash-current"
     assert entity["source_record_key"] == "dcp:station:current"
-    assert entity["attributes"]["longitude"] == 120.5
+    assert entity["attributes"]["longitude"] == 113.2
     assert entity["source_refs"] == [source_ref]
 
 
@@ -855,7 +1331,7 @@ def test_source_refs_are_merged_across_current_entity_upserts():
         latest_collected_at_epoch=_epoch("2026-05-03T21:30:12+08:00"),
         latest_source_record_hash="hash-first",
         source_refs=[first_ref],
-        attributes={"longitude": 116.0, "latitude": 39.0},
+        attributes={"longitude": 112.6, "latitude": 28.0},
     )
 
     store.upsert_canonical_entity(
@@ -869,7 +1345,7 @@ def test_source_refs_are_merged_across_current_entity_upserts():
         latest_collected_at_epoch=_epoch("2026-05-03T22:30:12+08:00"),
         latest_source_record_hash="hash-second",
         source_refs=[second_ref],
-        attributes={"longitude": 117.0, "latitude": 40.0},
+        attributes={"longitude": 113.0, "latitude": 28.6},
     )
 
     entity = store.list_canonical_entities(entity_type="station", dataset_key="station")[0]
@@ -878,7 +1354,7 @@ def test_source_refs_are_merged_across_current_entity_upserts():
     }
     assert source_record_keys == {"dcp:station:first", "dcp:station:second"}
     assert entity["latest_source_record_hash"] == "hash-second"
-    assert entity["attributes"]["longitude"] == 117.0
+    assert entity["attributes"]["longitude"] == 113.0
 
 
 def test_sandbox_skeleton_reports_truncated_when_over_limit():
@@ -905,8 +1381,8 @@ def test_sandbox_skeleton_reports_truncated_when_over_limit():
             attributes={
                 "project_code": "PRJ-001",
                 "single_project_code": f"SP-LIMIT-{index}",
-                "longitude": 116.0 + index,
-                "latitude": 39.0 + index,
+                "longitude": 112.0 + index,
+                "latitude": 28.0 + index,
             },
         )
 
