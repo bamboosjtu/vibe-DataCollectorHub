@@ -225,6 +225,7 @@ CREATE INDEX IF NOT EXISTS idx_external_collection_jobs_plugin_status ON externa
 CREATE INDEX IF NOT EXISTS idx_external_collection_jobs_created_at ON external_collection_jobs(created_at);
 CREATE INDEX IF NOT EXISTS idx_collection_schedules_plugin_enabled ON collection_schedules(plugin_id, enabled);
 CREATE INDEX IF NOT EXISTS idx_collection_schedules_next_run_at ON collection_schedules(next_run_at);
+CREATE INDEX IF NOT EXISTS idx_canonical_entities_type_dataset ON canonical_entities(entity_type, dataset_key);
 CREATE INDEX IF NOT EXISTS idx_canonical_relationships_type ON canonical_relationships(relationship_type);
 CREATE INDEX IF NOT EXISTS idx_canonical_relationships_from ON canonical_relationships(from_entity_type, from_entity_key);
 CREATE INDEX IF NOT EXISTS idx_canonical_relationships_to ON canonical_relationships(to_entity_type, to_entity_key);
@@ -413,6 +414,9 @@ class SQLiteStore:
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_canonical_entities_dataset ON canonical_entities(dataset_key)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_canonical_entities_type_dataset ON canonical_entities(entity_type, dataset_key)"
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_canonical_entities_date ON canonical_entities(entity_type, entity_date)"
@@ -1474,6 +1478,20 @@ class SQLiteStore:
         limit: int = 1000,
         offset: int = 0,
     ) -> List[Dict[str, Any]]:
+        return self.list_domain_entities_paged(
+            entity_type,
+            dataset_key=dataset_key,
+            limit=limit,
+            offset=offset,
+        )
+
+    def list_domain_entities_paged(
+        self,
+        entity_type: str,
+        dataset_key: Optional[str] = None,
+        limit: int = 1000,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
         conn = self._get_connection()
         try:
             where = ["entity_type = ?"]
@@ -1496,6 +1514,98 @@ class SQLiteStore:
                 for row in cursor.fetchall()
                 if (entity := self._decode_canonical_entity(row)) is not None
             ]
+        finally:
+            conn.close()
+
+    def list_domain_relationships_for_from_keys(
+        self,
+        *,
+        relationship_type: Optional[str],
+        from_entity_type: Optional[str],
+        from_entity_keys: List[str],
+    ) -> List[Dict[str, Any]]:
+        if not from_entity_keys:
+            return []
+        placeholders = ",".join("?" for _ in from_entity_keys)
+        conn = self._get_connection()
+        try:
+            where = [f"from_entity_key IN ({placeholders})"]
+            params: list[Any] = list(from_entity_keys)
+            if relationship_type:
+                where.append("relationship_type = ?")
+                params.append(relationship_type)
+            if from_entity_type:
+                where.append("from_entity_type = ?")
+                params.append(from_entity_type)
+            cursor = conn.execute(
+                f"""
+                SELECT * FROM canonical_relationships
+                WHERE {' AND '.join(where)}
+                ORDER BY updated_at DESC, id DESC
+                """,
+                params,
+            )
+            return [
+                relationship
+                for row in cursor.fetchall()
+                if (
+                    relationship := self._decode_canonical_relationship(row)
+                )
+                is not None
+            ]
+        finally:
+            conn.close()
+
+    def list_existing_entity_keys(
+        self, *, entity_type: str, entity_keys: List[str]
+    ) -> set[str]:
+        if not entity_keys:
+            return set()
+        placeholders = ",".join("?" for _ in entity_keys)
+        conn = self._get_connection()
+        try:
+            cursor = conn.execute(
+                f"""
+                SELECT entity_key FROM canonical_entities
+                WHERE entity_type = ? AND entity_key IN ({placeholders})
+                """,
+                [entity_type, *entity_keys],
+            )
+            return {str(row["entity_key"]) for row in cursor.fetchall()}
+        finally:
+            conn.close()
+
+    def list_existing_tower_scopes(
+        self, scopes: List[tuple[str, str]]
+    ) -> set[tuple[str, str]]:
+        if not scopes:
+            return set()
+        clauses: list[str] = []
+        params: list[Any] = ["tower"]
+        for single_project_code, bidding_section_code in scopes:
+            clauses.append(
+                "(json_extract(attributes, '$.single_project_code') = ? AND json_extract(attributes, '$.bidding_section_code') = ?)"
+            )
+            params.extend([single_project_code, bidding_section_code])
+        conn = self._get_connection()
+        try:
+            cursor = conn.execute(
+                f"""
+                SELECT
+                    json_extract(attributes, '$.single_project_code') AS single_project_code,
+                    json_extract(attributes, '$.bidding_section_code') AS bidding_section_code
+                FROM canonical_entities
+                WHERE entity_type = ? AND ({' OR '.join(clauses)})
+                GROUP BY 1, 2
+                """,
+                params,
+            )
+            return {
+                (str(row["single_project_code"]), str(row["bidding_section_code"]))
+                for row in cursor.fetchall()
+                if row["single_project_code"] not in (None, "")
+                and row["bidding_section_code"] not in (None, "")
+            }
         finally:
             conn.close()
 
@@ -1616,108 +1726,209 @@ class SQLiteStore:
         limit: int = 1000,
         offset: int = 0,
     ) -> List[Dict[str, Any]]:
-        projects = self.list_domain_entities("project", limit=100000)
-        if keyword:
-            needle = keyword.lower()
+        conn = self._get_connection()
+        try:
+            where = ["entity_type = 'project'"]
+            params: list[Any] = []
+            if keyword:
+                where.append(
+                    "("
+                    "COALESCE(json_extract(attributes, '$.project_code'), '') LIKE ? "
+                    "OR COALESCE(json_extract(attributes, '$.project_name'), '') LIKE ?"
+                    ")"
+                )
+                needle = f"%{keyword}%"
+                params.extend([needle, needle])
+            params.extend([limit, offset])
+            cursor = conn.execute(
+                f"""
+                SELECT * FROM canonical_entities
+                WHERE {' AND '.join(where)}
+                ORDER BY updated_at DESC, id DESC
+                LIMIT ? OFFSET ?
+                """,
+                params,
+            )
             projects = [
                 project
-                for project in projects
-                if needle in str(self._attribute(project, "project_code") or "").lower()
-                or needle in str(self._attribute(project, "project_name") or "").lower()
+                for row in cursor.fetchall()
+                if (project := self._decode_canonical_entity(row)) is not None
             ]
-        projects = projects[offset : offset + limit]
+            if not projects:
+                return []
 
-        single_by_project = self._single_project_keys_by_project()
-        bidding_by_single = self._bidding_section_keys_by_single()
-        line_by_bidding = self._line_section_keys_by_bidding()
-        towers = self.list_domain_entities("tower", limit=100000)
-        stations = self.list_domain_entities("station", limit=100000)
-        work_points = self.list_domain_entities("work_point", limit=100000)
-        progress_entities = self.list_domain_entities("project_progress", limit=100000)
-
-        items: List[Dict[str, Any]] = []
-        for project in projects:
-            project_key = project["entity_key"]
-            project_code = self._attribute(project, "project_code")
-            single_keys = list(dict.fromkeys(single_by_project.get(project_key, [])))
-            single_codes = {
-                key.split(":")[-1]
-                for key in single_keys
-                if isinstance(key, str) and key.startswith("dcp:single_project:")
-            }
+            project_keys = [project["entity_key"] for project in projects]
+            project_codes = [
+                self._attribute(project, "project_code")
+                for project in projects
+                if self._attribute(project, "project_code") not in (None, "")
+            ]
+            single_relationships = self.list_domain_relationships_for_from_keys(
+                relationship_type="HAS_SINGLE_PROJECT",
+                from_entity_type="project",
+                from_entity_keys=project_keys,
+            )
+            single_keys = list(
+                dict.fromkeys(
+                    relationship["to_entity_key"] for relationship in single_relationships
+                )
+            )
+            bidding_relationships = self.list_domain_relationships_for_from_keys(
+                relationship_type="HAS_BIDDING_SECTION",
+                from_entity_type="single_project",
+                from_entity_keys=single_keys,
+            )
             bidding_keys = list(
                 dict.fromkeys(
-                    key
-                    for single_key in single_keys
-                    for key in bidding_by_single.get(single_key, [])
+                    relationship["to_entity_key"] for relationship in bidding_relationships
                 )
             )
-            bidding_codes = {
-                key.split(":")[-1]
-                for key in bidding_keys
-                if isinstance(key, str) and key.startswith("dcp:bidding_section:")
+            line_relationships = self.list_domain_relationships_for_from_keys(
+                relationship_type="HAS_LINE_SECTION",
+                from_entity_type="bidding_section",
+                from_entity_keys=bidding_keys,
+            )
+
+            single_codes_by_project: Dict[str, set[str]] = {}
+            for relationship in single_relationships:
+                if relationship["to_entity_key"].startswith("dcp:single_project:"):
+                    single_codes_by_project.setdefault(
+                        relationship["from_entity_key"], set()
+                    ).add(relationship["to_entity_key"].split(":")[-1])
+
+            bidding_codes_by_project: Dict[str, set[str]] = {}
+            bidding_keys_by_project: Dict[str, set[str]] = {}
+            project_by_single_key = {
+                relationship["to_entity_key"]: relationship["from_entity_key"]
+                for relationship in single_relationships
             }
-            line_keys = list(
-                dict.fromkeys(
-                    key
-                    for bidding_key in bidding_keys
-                    for key in line_by_bidding.get(bidding_key, [])
+            for relationship in bidding_relationships:
+                project_key = project_by_single_key.get(relationship["from_entity_key"])
+                if not project_key:
+                    continue
+                bidding_keys_by_project.setdefault(project_key, set()).add(
+                    relationship["to_entity_key"]
                 )
-            )
-            tower_count = sum(
-                1
-                for entity in towers
-                if (
-                    self._attribute(entity, "project_code") == project_code
-                    or self._attribute(entity, "single_project_code") in single_codes
-                    or self._attribute(entity, "bidding_section_code") in bidding_codes
-                )
-            )
-            station_count = sum(
-                1
-                for entity in stations
-                if (
-                    self._attribute(entity, "project_code") == project_code
-                    or self._attribute(entity, "single_project_code") in single_codes
-                )
-            )
-            filtered_work_points = [
-                entity
-                for entity in work_points
-                if self._attribute(entity, "project_code") == project_code
-            ]
-            latest_work_date = None
-            if filtered_work_points:
-                latest_work_date = max(
-                    (
-                        entity.get("entity_date")
-                        or self._attribute(entity, "work_date")
-                        or ""
+                if relationship["to_entity_key"].startswith("dcp:bidding_section:"):
+                    bidding_codes_by_project.setdefault(project_key, set()).add(
+                        relationship["to_entity_key"].split(":")[-1]
                     )
-                    for entity in filtered_work_points
-                ) or None
-            progress_count = sum(
-                1
-                for entity in progress_entities
-                if self._attribute(entity, "project_code") == project_code
-            )
-            items.append(
-                {
-                    "project_key": project_key,
-                    "project_code": project_code,
-                    "project_name": self._attribute(project, "project_name"),
-                    "single_project_count": len(single_keys),
-                    "bidding_section_count": len(bidding_keys),
-                    "tower_count": tower_count,
-                    "station_count": station_count,
-                    "line_section_count": len(line_keys),
-                    "work_point_count": len(filtered_work_points),
-                    "progress_count": progress_count,
-                    "latest_work_date": latest_work_date,
-                    "latest_updated_at": project.get("updated_at"),
-                }
-            )
-        return items
+
+            line_keys_by_project: Dict[str, set[str]] = {}
+            project_by_bidding_key = {}
+            for project_key, keys in bidding_keys_by_project.items():
+                for key in keys:
+                    project_by_bidding_key[key] = project_key
+            for relationship in line_relationships:
+                project_key = project_by_bidding_key.get(relationship["from_entity_key"])
+                if project_key:
+                    line_keys_by_project.setdefault(project_key, set()).add(
+                        relationship["to_entity_key"]
+                    )
+
+            def _count_for_project(
+                *,
+                entity_type: str,
+                project_code: Any,
+                single_codes: set[str] | None = None,
+                bidding_codes: set[str] | None = None,
+            ) -> int:
+                clauses = ["entity_type = ?"]
+                clause_params: list[Any] = [entity_type]
+                or_clauses: list[str] = []
+                if project_code not in (None, ""):
+                    or_clauses.append(
+                        "json_extract(attributes, '$.project_code') = ?"
+                    )
+                    clause_params.append(project_code)
+                if single_codes:
+                    placeholders = ",".join("?" for _ in single_codes)
+                    or_clauses.append(
+                        f"json_extract(attributes, '$.single_project_code') IN ({placeholders})"
+                    )
+                    clause_params.extend(sorted(single_codes))
+                if bidding_codes:
+                    placeholders = ",".join("?" for _ in bidding_codes)
+                    or_clauses.append(
+                        f"json_extract(attributes, '$.bidding_section_code') IN ({placeholders})"
+                    )
+                    clause_params.extend(sorted(bidding_codes))
+                if not or_clauses:
+                    return 0
+                cursor = conn.execute(
+                    f"""
+                    SELECT COUNT(*) AS count
+                    FROM canonical_entities
+                    WHERE {' AND '.join(clauses)} AND ({' OR '.join(or_clauses)})
+                    """,
+                    clause_params,
+                )
+                row = cursor.fetchone()
+                return int(row["count"]) if row else 0
+
+            def _work_point_stats(project_code: Any) -> tuple[int, Optional[str]]:
+                if project_code in (None, ""):
+                    return 0, None
+                cursor = conn.execute(
+                    """
+                    SELECT COUNT(*) AS count, MAX(entity_date) AS latest_work_date
+                    FROM canonical_entities
+                    WHERE entity_type = 'work_point'
+                      AND json_extract(attributes, '$.project_code') = ?
+                    """,
+                    (project_code,),
+                )
+                row = cursor.fetchone()
+                return (
+                    int(row["count"]) if row and row["count"] is not None else 0,
+                    row["latest_work_date"] if row else None,
+                )
+
+            items: List[Dict[str, Any]] = []
+            for project in projects:
+                project_key = project["entity_key"]
+                project_code = self._attribute(project, "project_code")
+                single_codes = single_codes_by_project.get(project_key, set())
+                bidding_codes = bidding_codes_by_project.get(project_key, set())
+                work_point_count, latest_work_date = _work_point_stats(project_code)
+                progress_count = _count_for_project(
+                    entity_type="project_progress",
+                    project_code=project_code,
+                )
+                tower_count = _count_for_project(
+                    entity_type="tower",
+                    project_code=project_code,
+                    single_codes=single_codes,
+                    bidding_codes=bidding_codes,
+                )
+                station_count = _count_for_project(
+                    entity_type="station",
+                    project_code=project_code,
+                    single_codes=single_codes,
+                )
+                items.append(
+                    {
+                        "project_key": project_key,
+                        "project_code": project_code,
+                        "project_name": self._attribute(project, "project_name"),
+                        "single_project_count": len(single_codes),
+                        "bidding_section_count": len(
+                            bidding_keys_by_project.get(project_key, set())
+                        ),
+                        "tower_count": tower_count,
+                        "station_count": station_count,
+                        "line_section_count": len(
+                            line_keys_by_project.get(project_key, set())
+                        ),
+                        "work_point_count": work_point_count,
+                        "progress_count": progress_count,
+                        "latest_work_date": latest_work_date,
+                        "latest_updated_at": project.get("updated_at"),
+                    }
+                )
+            return items
+        finally:
+            conn.close()
 
     def get_domain_project(self, project_code: str) -> Optional[Dict[str, Any]]:
         return self._project_entity_by_code(project_code)

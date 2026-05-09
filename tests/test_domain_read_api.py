@@ -303,3 +303,97 @@ def test_domain_project_view_api_returns_base_aggregate() -> None:
     assert len(body["hierarchy"]["single_projects"]) == 1
     assert len(body["line_sections"]) == 1
     assert body["summary"]["project_progress_count"] == 1
+
+
+def test_domain_year_progress_api_uses_paged_project_progress_query() -> None:
+    store = _make_store()
+    _seed_domain_graph(store)
+    client = _client(store)
+
+    def _fail_full_scan(*_args, **_kwargs):
+        raise AssertionError("year_progress API must not full-scan list_domain_entities")
+
+    store.list_domain_entities = _fail_full_scan  # type: ignore[method-assign]
+
+    response = client.get("/api/v1/domain/year-progress?limit=5")
+
+    assert response.status_code == 200
+    assert response.json()["items"]
+
+
+def test_domain_year_progress_api_limit_5_returns_at_most_5_items() -> None:
+    store = _make_store()
+    for index in range(7):
+        store.upsert_canonical_entity(
+            entity_type="project_progress",
+            entity_key=f"dcp:project_progress:PROG-{index:03d}",
+            dataset_key="year_progress",
+            source_system="dcp",
+            source_record_key=f"progress-{index:03d}",
+            latest_raw_event_id=index + 1,
+            latest_collected_at="2026-05-08T21:30:12+08:00",
+            latest_collected_at_epoch=_epoch("2026-05-08T21:30:12+08:00"),
+            latest_source_record_hash=f"hash-progress-{index:03d}",
+            source_refs=[],
+            attributes={
+                "project_code": f"PRJ-{index:03d}",
+                "project_name": f"工程-{index:03d}",
+                "raw": {"singleList": [{"singleProjectCode": f"SP-{index:03d}"}]},
+            },
+        )
+    client = _client(store)
+
+    response = client.get("/api/v1/domain/year-progress?limit=5")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["items"]) == 5
+    assert body["limit"] == 5
+
+
+def test_domain_projects_api_limit_5_keeps_response_shape() -> None:
+    store = _make_store()
+    _seed_domain_graph(store)
+    client = _client(store)
+
+    response = client.get("/api/v1/domain/projects?limit=5")
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert {
+        "project_key",
+        "project_code",
+        "project_name",
+        "single_project_count",
+        "bidding_section_count",
+        "tower_count",
+        "station_count",
+        "line_section_count",
+        "work_point_count",
+        "progress_count",
+        "latest_updated_at",
+    }.issubset(item.keys())
+
+
+def test_domain_line_sections_api_limit_5_keeps_response_shape() -> None:
+    store = _make_store()
+    _seed_domain_graph(store)
+    client = _client(store)
+
+    response = client.get("/api/v1/domain/line-sections?limit=5")
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert {
+        "line_section_key",
+        "line_section_id",
+        "line_section_name",
+        "project_code",
+        "single_project_code",
+        "bidding_section_code",
+        "tower_sequence_count",
+        "matched_tower_count",
+        "reference_node_count",
+        "missing_physical_count",
+        "scope_without_tower_count",
+    }.issubset(item.keys())

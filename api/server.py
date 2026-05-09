@@ -626,29 +626,14 @@ def _line_section_index_items(
     limit: int = 1000,
     offset: int = 0,
 ) -> list[dict[str, Any]]:
-    line_sections = store.list_domain_entities("line_section", limit=100000)
-    towers = store.list_domain_entities("tower", limit=100000)
-    relationships = store.list_domain_relationships(
-        relationship_type="HAS_TOWER_SEQUENCE",
-        from_entity_type="line_section",
-        to_entity_type="tower",
-        limit=100000,
+    page = store.list_domain_entities_paged(
+        "line_section",
+        dataset_key="line_section",
+        limit=limit,
+        offset=offset,
     )
-
-    tower_keys = {entity["entity_key"] for entity in towers}
-    tower_scopes = {
-        scope
-        for entity in towers
-        if (scope := _tower_scope_from_key(entity["entity_key"])) is not None
-    }
-    relationships_by_line: dict[str, list[dict[str, Any]]] = {}
-    for relationship in relationships:
-        relationships_by_line.setdefault(relationship["from_entity_key"], []).append(
-            relationship
-        )
-
-    filtered = []
-    for entity in line_sections:
+    filtered_page = []
+    for entity in page:
         attributes = entity.get("attributes") or {}
         if project_code and attributes.get("project_code") != project_code:
             continue
@@ -662,14 +647,42 @@ def _line_section_index_items(
             and attributes.get("bidding_section_code") != bidding_section_code
         ):
             continue
+        filtered_page.append(entity)
 
+    if not filtered_page:
+        return []
+
+    line_keys = [entity["entity_key"] for entity in filtered_page]
+    relationships = store.list_domain_relationships_for_from_keys(
+        relationship_type="HAS_TOWER_SEQUENCE",
+        from_entity_type="line_section",
+        from_entity_keys=line_keys,
+    )
+    relationships_by_line: dict[str, list[dict[str, Any]]] = {}
+    target_tower_keys = []
+    target_scopes: list[tuple[str, str]] = []
+    for relationship in relationships:
+        relationships_by_line.setdefault(relationship["from_entity_key"], []).append(
+            relationship
+        )
+        target_tower_keys.append(relationship["to_entity_key"])
+        scope = _tower_scope_from_key(relationship["to_entity_key"])
+        if scope is not None:
+            target_scopes.append(scope)
+    existing_tower_keys = store.list_existing_entity_keys(
+        entity_type="tower", entity_keys=target_tower_keys
+    )
+    existing_tower_scopes = store.list_existing_tower_scopes(target_scopes)
+
+    items = []
+    for entity in filtered_page:
         matched_tower_count = 0
         reference_node_count = 0
         missing_physical_count = 0
         scope_without_tower_count = 0
         sequence = relationships_by_line.get(entity["entity_key"], [])
         for relationship in sequence:
-            if relationship["to_entity_key"] in tower_keys:
+            if relationship["to_entity_key"] in existing_tower_keys:
                 matched_tower_count += 1
                 continue
             rel_attributes = relationship.get("attributes") or {}
@@ -677,12 +690,13 @@ def _line_section_index_items(
                 reference_node_count += 1
                 continue
             scope = _tower_scope_from_key(relationship["to_entity_key"])
-            if scope and scope not in tower_scopes:
+            if scope and scope not in existing_tower_scopes:
                 scope_without_tower_count += 1
             else:
                 missing_physical_count += 1
 
-        filtered.append(
+        attributes = entity.get("attributes") or {}
+        items.append(
             {
                 "line_section_key": entity["entity_key"],
                 "line_section_id": attributes.get("line_section_id"),
@@ -698,7 +712,7 @@ def _line_section_index_items(
                 "latest_updated_at": entity.get("updated_at"),
             }
         )
-    return filtered[offset : offset + limit]
+    return items
 
 
 def _extract_progress_status(entity: dict[str, Any]) -> Any:
@@ -1544,7 +1558,12 @@ async def get_domain_year_progress(
     offset: int = Query(0, ge=0),
 ):
     items = []
-    for entity in store.list_domain_entities("project_progress", limit=100000):
+    for entity in store.list_domain_entities_paged(
+        "project_progress",
+        dataset_key="year_progress",
+        limit=limit,
+        offset=offset,
+    ):
         attributes = entity.get("attributes") or {}
         current_project_code = attributes.get("project_code")
         current_status = _extract_progress_status(entity)
@@ -1552,33 +1571,27 @@ async def get_domain_year_progress(
             continue
         if status and current_status != status:
             continue
-        related_view = (
-            store.get_project_domain_view(
-                current_project_code,
-                include_work_points=False,
-                include_towers=False,
-                include_stations=False,
-                include_line_sections=False,
-                limit=10000,
-            )
-            if current_project_code
-            else None
-        )
+        raw = attributes.get("raw") if isinstance(attributes.get("raw"), dict) else {}
+        related_single_projects = []
+        single_list = raw.get("singleList")
+        if isinstance(single_list, list):
+            for item in single_list:
+                if not isinstance(item, dict):
+                    continue
+                code = item.get("singleProjectCode")
+                if code not in (None, ""):
+                    related_single_projects.append(code)
         items.append(
             {
                 "project_code": current_project_code,
                 "project_name": attributes.get("project_name"),
                 "progress_key": entity["entity_key"],
                 "status": current_status,
-                "raw": attributes.get("raw"),
-                "related_single_projects": [
-                    single.get("attributes", {}).get("single_project_code")
-                    for single in (related_view or {}).get("single_projects", [])
-                ],
+                "raw": raw,
+                "related_single_projects": related_single_projects,
                 "latest_updated_at": entity.get("updated_at"),
             }
         )
-    items = items[offset : offset + limit]
     return {
         "items": items,
         "limit": limit,
