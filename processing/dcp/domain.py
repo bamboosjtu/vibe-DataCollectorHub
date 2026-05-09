@@ -8,6 +8,7 @@ fixtures/data instead of inventing fallback aliases.
 from __future__ import annotations
 
 from datetime import datetime
+import re
 from typing import Any
 
 from processing.dcp.keys import dcp_tower_key, dcp_unscoped_tower_key, normalize_tower_no
@@ -122,6 +123,22 @@ def _first_present(raw: dict[str, Any], context: dict[str, Any], raw_key: str, c
 
 def _string_value(value: Any) -> str | None:
     return None if value in (None, "") else str(value)
+
+
+def _contains_chinese(value: str) -> bool:
+    return bool(re.search(r"[\u4e00-\u9fff]", value))
+
+
+def _tower_sequence_node_kind(tower_no: str) -> str:
+    if (
+        "线#" in tower_no
+        or "站" in tower_no
+        or "龙门架" in tower_no
+        or "间隔" in tower_no
+        or (_contains_chinese(tower_no) and "#" in tower_no)
+    ):
+        return "reference_node"
+    return "physical_candidate"
 
 
 def _codes_from_raw_and_context(raw: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
@@ -512,7 +529,12 @@ def extract_section_details(
                     to_entity_key=tower_key,
                     dataset_key=dataset_key,
                     raw_event=raw_event,
-                    attributes={"sequence": index, "tower_no": tower_no},
+                    attributes={
+                        "sequence": index,
+                        "sequence_index": index,
+                        "tower_no": tower_no,
+                        "node_kind": _tower_sequence_node_kind(tower_no),
+                    },
                 )
             )
 

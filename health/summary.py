@@ -51,8 +51,10 @@ def get_health_summary(
 
     if daily_meeting_health["missing_dates"]:
         warning_reasons.append("daily_meeting has missing recent dates")
-    if domain_health["tower_sequence_orphan_count"] > 0:
-        warning_reasons.append("tower sequence relationships point to missing tower entities")
+    if domain_health["tower_sequence_missing_physical_entity_count"] > 0:
+        warning_reasons.append(
+            "tower sequence physical candidates point to missing tower entities"
+        )
 
     for key, coverage in context_health.items():
         if coverage["status"] == "failed":

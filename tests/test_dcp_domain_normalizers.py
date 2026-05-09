@@ -159,6 +159,10 @@ def test_section_details_generates_line_section_and_tower_sequence_relationships
         dcp_tower_key("SP-003", "BS-003", "T001"),
         dcp_tower_key("SP-003", "BS-003", "T002"),
     }
+    assert {item["attributes"]["node_kind"] for item in tower_sequence} == {
+        "physical_candidate"
+    }
+    assert {item["attributes"]["sequence_index"] for item in tower_sequence} == {1, 2}
 
 
 def test_section_details_missing_context_marks_known_issue_without_fake_hierarchy() -> None:
@@ -256,6 +260,87 @@ def test_section_details_context_scopes_multiple_tower_sequence_keys() -> None:
         dcp_tower_key("S01", "B01", "G1"),
         dcp_tower_key("S01", "B01", "G2"),
     }
+
+
+def test_section_details_marks_plain_tower_numbers_as_physical_candidates() -> None:
+    store = _make_store()
+    event = _event(
+        suffix="section-details-physical",
+        dataset_key="line_section",
+        page_name="区段划分",
+        api_name="section_details",
+        raw={
+            "id": "LS-PHYSICAL",
+            "sectionName": "实体塔区段",
+            "sectionVo": {"towerNoList": [{"towerNo": "G001"}]},
+        },
+        context={
+            "single_project_code": "S01",
+            "bidding_section_code": "B01",
+        },
+    )
+    store.save_raw_event(event, dataset_key="line_section")
+
+    NormalizerRunner(store).run("line_section")
+
+    relationship = store.list_canonical_relationships(
+        relationship_type="HAS_TOWER_SEQUENCE"
+    )[0]
+    assert relationship["attributes"]["node_kind"] == "physical_candidate"
+
+
+def test_section_details_marks_line_name_tower_nodes_as_reference_nodes() -> None:
+    store = _make_store()
+    event = _event(
+        suffix="section-details-line-reference",
+        dataset_key="line_section",
+        page_name="区段划分",
+        api_name="section_details",
+        raw={
+            "id": "LS-LINE-REF",
+            "sectionName": "线路引用区段",
+            "sectionVo": {"towerNoList": [{"towerNo": "韶鹤Ⅰ线#001"}]},
+        },
+        context={
+            "single_project_code": "S01",
+            "bidding_section_code": "B01",
+        },
+    )
+    store.save_raw_event(event, dataset_key="line_section")
+
+    NormalizerRunner(store).run("line_section")
+
+    relationship = store.list_canonical_relationships(
+        relationship_type="HAS_TOWER_SEQUENCE"
+    )[0]
+    assert relationship["attributes"]["node_kind"] == "reference_node"
+
+
+def test_section_details_marks_station_dragon_gate_nodes_as_reference_nodes() -> None:
+    store = _make_store()
+    event = _event(
+        suffix="section-details-station-reference",
+        dataset_key="line_section",
+        page_name="区段划分",
+        api_name="section_details",
+        raw={
+            "id": "LS-STATION-REF",
+            "sectionName": "站内引用区段",
+            "sectionVo": {"towerNoList": [{"towerNo": "鹤岭站龙门架"}]},
+        },
+        context={
+            "single_project_code": "S01",
+            "bidding_section_code": "B01",
+        },
+    )
+    store.save_raw_event(event, dataset_key="line_section")
+
+    NormalizerRunner(store).run("line_section")
+
+    relationship = store.list_canonical_relationships(
+        relationship_type="HAS_TOWER_SEQUENCE"
+    )[0]
+    assert relationship["attributes"]["node_kind"] == "reference_node"
 
 
 def test_flat_hierarchy_can_use_source_context_when_raw_lacks_codes() -> None:

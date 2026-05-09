@@ -49,6 +49,8 @@ def get_domain_health(store: SQLiteStore) -> dict[str, Any]:
     orphan_relationship_count = 0
     unscoped_tower_sequence_count = 0
     tower_sequence_orphan_count = 0
+    tower_sequence_reference_count = 0
+    tower_sequence_missing_physical_entity_count = 0
     project_with_single: set[str] = set()
     single_with_bidding: set[str] = set()
     bidding_with_line: set[str] = set()
@@ -69,6 +71,11 @@ def get_domain_health(store: SQLiteStore) -> dict[str, Any]:
                 unscoped_tower_sequence_count += 1
             if to_identity not in entity_identities:
                 tower_sequence_orphan_count += 1
+                attributes = relationship.get("attributes") or {}
+                if attributes.get("node_kind") == "reference_node":
+                    tower_sequence_reference_count += 1
+                else:
+                    tower_sequence_missing_physical_entity_count += 1
         if relationship_type == "HAS_SINGLE_PROJECT":
             project_with_single.add(relationship["from_entity_key"])
         if relationship_type == "HAS_BIDDING_SECTION":
@@ -109,8 +116,11 @@ def get_domain_health(store: SQLiteStore) -> dict[str, Any]:
         "unscoped_tower_sequence_count": unscoped_tower_sequence_count,
         "unscoped_tower_entity_count": unscoped_tower_entity_count,
         "tower_sequence_orphan_count": tower_sequence_orphan_count,
+        "tower_sequence_reference_count": tower_sequence_reference_count,
+        "tower_sequence_missing_physical_entity_count": tower_sequence_missing_physical_entity_count,
         "line_section_known_issue_count": line_section_known_issue_count,
         "orphan_relationship_count": orphan_relationship_count,
+        "orphan_relationship_note": "orphan_relationship_count includes tower sequence reference nodes and is not always a data error",
         "project_without_single_project_count": project_without_single_project_count,
         "single_project_without_bidding_section_count": single_project_without_bidding_section_count,
         "bidding_section_without_line_section_count": bidding_section_without_line_section_count,
