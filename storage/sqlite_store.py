@@ -285,6 +285,18 @@ class SQLiteStore:
         conn.execute("PRAGMA foreign_keys = ON")
         return conn
 
+    @staticmethod
+    def _load_json_or_default(
+        value: Any,
+        default: Any,
+    ) -> Any:
+        if value in (None, ""):
+            return default
+        try:
+            return json.loads(value)
+        except (TypeError, json.JSONDecodeError):
+            return default
+
     def init_schema(self) -> None:
         """Initialize database schema"""
         conn = self._get_connection()
@@ -926,11 +938,9 @@ class SQLiteStore:
 
     def _decode_raw_event_row(self, row: sqlite3.Row) -> Dict[str, Any]:
         result = dict(row)
-        result["payload"] = json.loads(result["payload"]) if result["payload"] else {}
-        result["source_ref"] = (
-            json.loads(result["source_ref"]) if result["source_ref"] else {}
-        )
-        result["event"] = json.loads(result["event"]) if result["event"] else {}
+        result["payload"] = self._load_json_or_default(result.get("payload"), {})
+        result["source_ref"] = self._load_json_or_default(result.get("source_ref"), {})
+        result["event"] = self._load_json_or_default(result.get("event"), {})
         return result
 
     def get_raw_event_by_idempotency_key(
@@ -1227,19 +1237,27 @@ class SQLiteStore:
                 """,
                 params,
             )
-            entities = []
-            for row in cursor.fetchall():
-                entity = dict(row)
-                entity["attributes"] = (
-                    json.loads(entity["attributes"]) if entity["attributes"] else {}
-                )
-                entity["source_refs"] = (
-                    json.loads(entity["source_refs"]) if entity["source_refs"] else []
-                )
-                entities.append(entity)
-            return entities
+            return [
+                entity
+                for row in cursor.fetchall()
+                if (entity := self._decode_canonical_entity(row)) is not None
+            ]
         finally:
             conn.close()
+
+    def _decode_canonical_entity(
+        self, row: sqlite3.Row | None
+    ) -> Optional[Dict[str, Any]]:
+        if not row:
+            return None
+        entity = dict(row)
+        entity["attributes"] = self._load_json_or_default(
+            entity.get("attributes"), {}
+        )
+        entity["source_refs"] = self._load_json_or_default(
+            entity.get("source_refs"), []
+        )
+        return entity
 
     def get_latest_canonical_entity_date(
         self, entity_type: str
@@ -1285,10 +1303,8 @@ class SQLiteStore:
         if not row:
             return None
         relationship = dict(row)
-        relationship["attributes"] = (
-            json.loads(relationship["attributes"])
-            if relationship.get("attributes")
-            else {}
+        relationship["attributes"] = self._load_json_or_default(
+            relationship.get("attributes"), {}
         )
         return relationship
 
@@ -1448,6 +1464,445 @@ class SQLiteStore:
             ]
         finally:
             conn.close()
+
+    # --- Domain read model query helpers ---
+
+    def list_domain_entities(
+        self,
+        entity_type: str,
+        dataset_key: Optional[str] = None,
+        limit: int = 1000,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        conn = self._get_connection()
+        try:
+            where = ["entity_type = ?"]
+            params: list[Any] = [entity_type]
+            if dataset_key:
+                where.append("dataset_key = ?")
+                params.append(dataset_key)
+            params.extend([limit, offset])
+            cursor = conn.execute(
+                f"""
+                SELECT * FROM canonical_entities
+                WHERE {' AND '.join(where)}
+                ORDER BY updated_at DESC, id DESC
+                LIMIT ? OFFSET ?
+                """,
+                params,
+            )
+            return [
+                entity
+                for row in cursor.fetchall()
+                if (entity := self._decode_canonical_entity(row)) is not None
+            ]
+        finally:
+            conn.close()
+
+    def list_domain_relationships(
+        self,
+        relationship_type: Optional[str] = None,
+        from_entity_type: Optional[str] = None,
+        from_entity_key: Optional[str] = None,
+        to_entity_type: Optional[str] = None,
+        to_entity_key: Optional[str] = None,
+        dataset_key: Optional[str] = None,
+        limit: int = 1000,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        conn = self._get_connection()
+        try:
+            where = ["1=1"]
+            params: list[Any] = []
+            if relationship_type:
+                where.append("relationship_type = ?")
+                params.append(relationship_type)
+            if from_entity_type:
+                where.append("from_entity_type = ?")
+                params.append(from_entity_type)
+            if from_entity_key:
+                where.append("from_entity_key = ?")
+                params.append(from_entity_key)
+            if to_entity_type:
+                where.append("to_entity_type = ?")
+                params.append(to_entity_type)
+            if to_entity_key:
+                where.append("to_entity_key = ?")
+                params.append(to_entity_key)
+            if dataset_key:
+                where.append("dataset_key = ?")
+                params.append(dataset_key)
+            params.extend([limit, offset])
+            cursor = conn.execute(
+                f"""
+                SELECT * FROM canonical_relationships
+                WHERE {' AND '.join(where)}
+                ORDER BY updated_at DESC, id DESC
+                LIMIT ? OFFSET ?
+                """,
+                params,
+            )
+            return [
+                relationship
+                for row in cursor.fetchall()
+                if (
+                    relationship := self._decode_canonical_relationship(row)
+                )
+                is not None
+            ]
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _attribute(entity: Dict[str, Any], key: str) -> Any:
+        attributes = entity.get("attributes") or {}
+        return attributes.get(key) if isinstance(attributes, dict) else None
+
+    @staticmethod
+    def _tower_scope_from_key(entity_key: str) -> tuple[str, str] | None:
+        parts = str(entity_key).split(":")
+        if parts[:2] != ["dcp", "tower"] or len(parts) < 5:
+            return None
+        return parts[2], parts[3]
+
+    def _single_project_keys_by_project(self) -> Dict[str, List[str]]:
+        mapping: Dict[str, List[str]] = {}
+        for relationship in self.list_domain_relationships(
+            relationship_type="HAS_SINGLE_PROJECT",
+            from_entity_type="project",
+            to_entity_type="single_project",
+            limit=100000,
+        ):
+            mapping.setdefault(relationship["from_entity_key"], []).append(
+                relationship["to_entity_key"]
+            )
+        return mapping
+
+    def _bidding_section_keys_by_single(self) -> Dict[str, List[str]]:
+        mapping: Dict[str, List[str]] = {}
+        for relationship in self.list_domain_relationships(
+            relationship_type="HAS_BIDDING_SECTION",
+            from_entity_type="single_project",
+            to_entity_type="bidding_section",
+            limit=100000,
+        ):
+            mapping.setdefault(relationship["from_entity_key"], []).append(
+                relationship["to_entity_key"]
+            )
+        return mapping
+
+    def _line_section_keys_by_bidding(self) -> Dict[str, List[str]]:
+        mapping: Dict[str, List[str]] = {}
+        for relationship in self.list_domain_relationships(
+            relationship_type="HAS_LINE_SECTION",
+            from_entity_type="bidding_section",
+            to_entity_type="line_section",
+            limit=100000,
+        ):
+            mapping.setdefault(relationship["from_entity_key"], []).append(
+                relationship["to_entity_key"]
+            )
+        return mapping
+
+    def _project_entity_by_code(self, project_code: str) -> Optional[Dict[str, Any]]:
+        for entity in self.list_domain_entities("project", limit=100000):
+            if self._attribute(entity, "project_code") == project_code:
+                return entity
+        return None
+
+    def list_domain_projects(
+        self,
+        keyword: Optional[str] = None,
+        limit: int = 1000,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        projects = self.list_domain_entities("project", limit=100000)
+        if keyword:
+            needle = keyword.lower()
+            projects = [
+                project
+                for project in projects
+                if needle in str(self._attribute(project, "project_code") or "").lower()
+                or needle in str(self._attribute(project, "project_name") or "").lower()
+            ]
+        projects = projects[offset : offset + limit]
+
+        single_by_project = self._single_project_keys_by_project()
+        bidding_by_single = self._bidding_section_keys_by_single()
+        line_by_bidding = self._line_section_keys_by_bidding()
+        towers = self.list_domain_entities("tower", limit=100000)
+        stations = self.list_domain_entities("station", limit=100000)
+        work_points = self.list_domain_entities("work_point", limit=100000)
+        progress_entities = self.list_domain_entities("project_progress", limit=100000)
+
+        items: List[Dict[str, Any]] = []
+        for project in projects:
+            project_key = project["entity_key"]
+            project_code = self._attribute(project, "project_code")
+            single_keys = list(dict.fromkeys(single_by_project.get(project_key, [])))
+            single_codes = {
+                key.split(":")[-1]
+                for key in single_keys
+                if isinstance(key, str) and key.startswith("dcp:single_project:")
+            }
+            bidding_keys = list(
+                dict.fromkeys(
+                    key
+                    for single_key in single_keys
+                    for key in bidding_by_single.get(single_key, [])
+                )
+            )
+            bidding_codes = {
+                key.split(":")[-1]
+                for key in bidding_keys
+                if isinstance(key, str) and key.startswith("dcp:bidding_section:")
+            }
+            line_keys = list(
+                dict.fromkeys(
+                    key
+                    for bidding_key in bidding_keys
+                    for key in line_by_bidding.get(bidding_key, [])
+                )
+            )
+            tower_count = sum(
+                1
+                for entity in towers
+                if (
+                    self._attribute(entity, "project_code") == project_code
+                    or self._attribute(entity, "single_project_code") in single_codes
+                    or self._attribute(entity, "bidding_section_code") in bidding_codes
+                )
+            )
+            station_count = sum(
+                1
+                for entity in stations
+                if (
+                    self._attribute(entity, "project_code") == project_code
+                    or self._attribute(entity, "single_project_code") in single_codes
+                )
+            )
+            filtered_work_points = [
+                entity
+                for entity in work_points
+                if self._attribute(entity, "project_code") == project_code
+            ]
+            latest_work_date = None
+            if filtered_work_points:
+                latest_work_date = max(
+                    (
+                        entity.get("entity_date")
+                        or self._attribute(entity, "work_date")
+                        or ""
+                    )
+                    for entity in filtered_work_points
+                ) or None
+            progress_count = sum(
+                1
+                for entity in progress_entities
+                if self._attribute(entity, "project_code") == project_code
+            )
+            items.append(
+                {
+                    "project_key": project_key,
+                    "project_code": project_code,
+                    "project_name": self._attribute(project, "project_name"),
+                    "single_project_count": len(single_keys),
+                    "bidding_section_count": len(bidding_keys),
+                    "tower_count": tower_count,
+                    "station_count": station_count,
+                    "line_section_count": len(line_keys),
+                    "work_point_count": len(filtered_work_points),
+                    "progress_count": progress_count,
+                    "latest_work_date": latest_work_date,
+                    "latest_updated_at": project.get("updated_at"),
+                }
+            )
+        return items
+
+    def get_domain_project(self, project_code: str) -> Optional[Dict[str, Any]]:
+        return self._project_entity_by_code(project_code)
+
+    def get_project_domain_view(
+        self,
+        project_code: str,
+        *,
+        date: Optional[str] = None,
+        include_work_points: bool = True,
+        include_towers: bool = True,
+        include_stations: bool = True,
+        include_line_sections: bool = True,
+        limit: int = 10000,
+    ) -> Optional[Dict[str, Any]]:
+        project = self._project_entity_by_code(project_code)
+        if project is None:
+            return None
+
+        project_key = project["entity_key"]
+        project_relationships = self.list_domain_relationships(
+            relationship_type="HAS_SINGLE_PROJECT",
+            from_entity_type="project",
+            from_entity_key=project_key,
+            limit=100000,
+        )
+        progress_relationships = self.list_domain_relationships(
+            relationship_type="HAS_PROJECT_PROGRESS",
+            from_entity_type="project",
+            from_entity_key=project_key,
+            limit=100000,
+        )
+        single_keys = list(
+            dict.fromkeys(
+                relationship["to_entity_key"] for relationship in project_relationships
+            )
+        )
+        single_entities = {
+            entity["entity_key"]: entity
+            for entity in self.list_domain_entities("single_project", limit=100000)
+            if entity["entity_key"] in set(single_keys)
+        }
+        bidding_relationships_all = self.list_domain_relationships(
+            relationship_type="HAS_BIDDING_SECTION",
+            from_entity_type="single_project",
+            limit=100000,
+        )
+        bidding_relationships = [
+            relationship
+            for relationship in bidding_relationships_all
+            if relationship["from_entity_key"] in set(single_keys)
+        ]
+        bidding_keys = list(
+            dict.fromkeys(
+                relationship["to_entity_key"] for relationship in bidding_relationships
+            )
+        )
+        bidding_entities = {
+            entity["entity_key"]: entity
+            for entity in self.list_domain_entities("bidding_section", limit=100000)
+            if entity["entity_key"] in set(bidding_keys)
+        }
+        line_relationships_all = self.list_domain_relationships(
+            relationship_type="HAS_LINE_SECTION",
+            from_entity_type="bidding_section",
+            limit=100000,
+        )
+        line_relationships = [
+            relationship
+            for relationship in line_relationships_all
+            if relationship["from_entity_key"] in set(bidding_keys)
+        ]
+        line_keys = list(
+            dict.fromkeys(
+                relationship["to_entity_key"] for relationship in line_relationships
+            )
+        )
+        line_entities = {
+            entity["entity_key"]: entity
+            for entity in self.list_domain_entities("line_section", limit=100000)
+            if entity["entity_key"] in set(line_keys)
+        }
+        tower_sequence_relationships = (
+            [
+                relationship
+                for relationship in self.list_domain_relationships(
+                    relationship_type="HAS_TOWER_SEQUENCE",
+                    from_entity_type="line_section",
+                    limit=100000,
+                )
+                if relationship["from_entity_key"] in set(line_keys)
+            ]
+            if include_line_sections
+            else []
+        )
+
+        single_project_codes = {
+            self._attribute(entity, "single_project_code")
+            for entity in single_entities.values()
+            if self._attribute(entity, "single_project_code")
+        }
+        bidding_section_codes = {
+            self._attribute(entity, "bidding_section_code")
+            for entity in bidding_entities.values()
+            if self._attribute(entity, "bidding_section_code")
+        }
+
+        tower_entities_all = self.list_domain_entities("tower", limit=100000)
+        tower_entities = [
+            entity
+            for entity in tower_entities_all
+            if (
+                self._attribute(entity, "project_code") == project_code
+                or self._attribute(entity, "single_project_code")
+                in single_project_codes
+                or self._attribute(entity, "bidding_section_code")
+                in bidding_section_codes
+            )
+        ]
+        station_entities_all = self.list_domain_entities("station", limit=100000)
+        station_entities = [
+            entity
+            for entity in station_entities_all
+            if (
+                self._attribute(entity, "project_code") == project_code
+                or self._attribute(entity, "single_project_code")
+                in single_project_codes
+            )
+        ]
+        work_point_entities_all = self.list_domain_entities("work_point", limit=100000)
+        work_point_entities = [
+            entity
+            for entity in work_point_entities_all
+            if self._attribute(entity, "project_code") == project_code
+            and (date is None or entity.get("entity_date") == date)
+        ]
+        work_point_entities.sort(
+            key=lambda entity: (
+                entity.get("entity_date") or "",
+                entity.get("updated_at") or "",
+            ),
+            reverse=True,
+        )
+        progress_keys = list(
+            dict.fromkeys(
+                relationship["to_entity_key"] for relationship in progress_relationships
+            )
+        )
+        progress_entities = [
+            entity
+            for entity in self.list_domain_entities("project_progress", limit=100000)
+            if entity["entity_key"] in set(progress_keys)
+            or self._attribute(entity, "project_code") == project_code
+        ]
+
+        relationships = [
+            *project_relationships,
+            *progress_relationships,
+            *bidding_relationships,
+            *line_relationships,
+            *tower_sequence_relationships,
+        ]
+
+        return {
+            "project": project,
+            "single_projects": list(single_entities.values()),
+            "bidding_sections": list(bidding_entities.values()),
+            "towers": tower_entities[:limit] if include_towers else [],
+            "stations": station_entities[:limit] if include_stations else [],
+            "line_sections": list(line_entities.values())[:limit]
+            if include_line_sections
+            else [],
+            "work_points": work_point_entities[:limit] if include_work_points else [],
+            "project_progress": progress_entities[:limit],
+            "relationships": relationships,
+            "summary": {
+                "single_project_count": len(single_entities),
+                "bidding_section_count": len(bidding_entities),
+                "tower_count": len(tower_entities),
+                "station_count": len(station_entities),
+                "line_section_count": len(line_entities),
+                "work_point_count": len(work_point_entities),
+                "project_progress_count": len(progress_entities),
+            },
+        }
 
     # --- Normalizer state operations ---
 

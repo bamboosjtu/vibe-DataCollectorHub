@@ -611,6 +611,108 @@ def _collection_scheduler_tick_interval_seconds() -> int:
     return int(value) if int(value) > 0 else 60
 
 
+def _tower_scope_from_key(entity_key: str) -> tuple[str, str] | None:
+    parts = str(entity_key).split(":")
+    if parts[:2] != ["dcp", "tower"] or len(parts) < 5:
+        return None
+    return parts[2], parts[3]
+
+
+def _line_section_index_items(
+    *,
+    project_code: str | None = None,
+    single_project_code: str | None = None,
+    bidding_section_code: str | None = None,
+    limit: int = 1000,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    line_sections = store.list_domain_entities("line_section", limit=100000)
+    towers = store.list_domain_entities("tower", limit=100000)
+    relationships = store.list_domain_relationships(
+        relationship_type="HAS_TOWER_SEQUENCE",
+        from_entity_type="line_section",
+        to_entity_type="tower",
+        limit=100000,
+    )
+
+    tower_keys = {entity["entity_key"] for entity in towers}
+    tower_scopes = {
+        scope
+        for entity in towers
+        if (scope := _tower_scope_from_key(entity["entity_key"])) is not None
+    }
+    relationships_by_line: dict[str, list[dict[str, Any]]] = {}
+    for relationship in relationships:
+        relationships_by_line.setdefault(relationship["from_entity_key"], []).append(
+            relationship
+        )
+
+    filtered = []
+    for entity in line_sections:
+        attributes = entity.get("attributes") or {}
+        if project_code and attributes.get("project_code") != project_code:
+            continue
+        if (
+            single_project_code
+            and attributes.get("single_project_code") != single_project_code
+        ):
+            continue
+        if (
+            bidding_section_code
+            and attributes.get("bidding_section_code") != bidding_section_code
+        ):
+            continue
+
+        matched_tower_count = 0
+        reference_node_count = 0
+        missing_physical_count = 0
+        scope_without_tower_count = 0
+        sequence = relationships_by_line.get(entity["entity_key"], [])
+        for relationship in sequence:
+            if relationship["to_entity_key"] in tower_keys:
+                matched_tower_count += 1
+                continue
+            rel_attributes = relationship.get("attributes") or {}
+            if rel_attributes.get("node_kind") == "reference_node":
+                reference_node_count += 1
+                continue
+            scope = _tower_scope_from_key(relationship["to_entity_key"])
+            if scope and scope not in tower_scopes:
+                scope_without_tower_count += 1
+            else:
+                missing_physical_count += 1
+
+        filtered.append(
+            {
+                "line_section_key": entity["entity_key"],
+                "line_section_id": attributes.get("line_section_id"),
+                "line_section_name": attributes.get("line_section_name"),
+                "project_code": attributes.get("project_code"),
+                "single_project_code": attributes.get("single_project_code"),
+                "bidding_section_code": attributes.get("bidding_section_code"),
+                "tower_sequence_count": len(sequence),
+                "matched_tower_count": matched_tower_count,
+                "reference_node_count": reference_node_count,
+                "missing_physical_count": missing_physical_count,
+                "scope_without_tower_count": scope_without_tower_count,
+                "latest_updated_at": entity.get("updated_at"),
+            }
+        )
+    return filtered[offset : offset + limit]
+
+
+def _extract_progress_status(entity: dict[str, Any]) -> Any:
+    attributes = entity.get("attributes") or {}
+    raw = attributes.get("raw")
+    if not isinstance(raw, dict):
+        return None
+    for key in ("status", "projectStatus", "constructionStatus", "progressStatus"):
+        value = raw.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
 def _start_external_collection_job(job_id: str, command: list[str], cwd: str) -> None:
     thread = threading.Thread(
         target=_run_external_collection_job,
@@ -1369,6 +1471,188 @@ async def health_daily_meeting(recent_days: int = Query(14, ge=1, le=365)):
 @app.get("/health/v1/context")
 async def health_context():
     return get_context_coverage(store)
+
+
+@app.get("/api/v1/domain/projects")
+async def get_domain_projects(
+    limit: int = Query(1000, ge=1, le=5000),
+    offset: int = Query(0, ge=0),
+    keyword: Optional[str] = Query(None),
+):
+    items = store.list_domain_projects(keyword=keyword, limit=limit, offset=offset)
+    return {
+        "items": items,
+        "limit": limit,
+        "offset": offset,
+        "keyword": keyword,
+        "count": len(items),
+    }
+
+
+@app.get("/api/v1/domain/projects/{project_code}")
+async def get_domain_project_detail(
+    project_code: str,
+    include_towers: bool = Query(True),
+    include_stations: bool = Query(True),
+    include_line_sections: bool = Query(True),
+    include_work_points: bool = Query(True),
+    date: Optional[str] = Query(None),
+    limit: int = Query(10000, ge=1, le=50000),
+):
+    view = store.get_project_domain_view(
+        project_code,
+        date=date,
+        include_work_points=include_work_points,
+        include_towers=include_towers,
+        include_stations=include_stations,
+        include_line_sections=include_line_sections,
+        limit=limit,
+    )
+    if view is None:
+        raise HTTPException(status_code=404, detail=f"project not found: {project_code}")
+    return view
+
+
+@app.get("/api/v1/domain/line-sections")
+async def get_domain_line_sections(
+    project_code: Optional[str] = Query(None),
+    single_project_code: Optional[str] = Query(None),
+    bidding_section_code: Optional[str] = Query(None),
+    limit: int = Query(1000, ge=1, le=5000),
+    offset: int = Query(0, ge=0),
+):
+    items = _line_section_index_items(
+        project_code=project_code,
+        single_project_code=single_project_code,
+        bidding_section_code=bidding_section_code,
+        limit=limit,
+        offset=offset,
+    )
+    return {
+        "items": items,
+        "limit": limit,
+        "offset": offset,
+        "count": len(items),
+    }
+
+
+@app.get("/api/v1/domain/year-progress")
+async def get_domain_year_progress(
+    project_code: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    limit: int = Query(1000, ge=1, le=5000),
+    offset: int = Query(0, ge=0),
+):
+    items = []
+    for entity in store.list_domain_entities("project_progress", limit=100000):
+        attributes = entity.get("attributes") or {}
+        current_project_code = attributes.get("project_code")
+        current_status = _extract_progress_status(entity)
+        if project_code and current_project_code != project_code:
+            continue
+        if status and current_status != status:
+            continue
+        related_view = (
+            store.get_project_domain_view(
+                current_project_code,
+                include_work_points=False,
+                include_towers=False,
+                include_stations=False,
+                include_line_sections=False,
+                limit=10000,
+            )
+            if current_project_code
+            else None
+        )
+        items.append(
+            {
+                "project_code": current_project_code,
+                "project_name": attributes.get("project_name"),
+                "progress_key": entity["entity_key"],
+                "status": current_status,
+                "raw": attributes.get("raw"),
+                "related_single_projects": [
+                    single.get("attributes", {}).get("single_project_code")
+                    for single in (related_view or {}).get("single_projects", [])
+                ],
+                "latest_updated_at": entity.get("updated_at"),
+            }
+        )
+    items = items[offset : offset + limit]
+    return {
+        "items": items,
+        "limit": limit,
+        "offset": offset,
+        "count": len(items),
+    }
+
+
+@app.get("/api/v1/domain/relationships")
+async def get_domain_relationships(
+    relationship_type: Optional[str] = Query(None),
+    from_entity_type: Optional[str] = Query(None),
+    from_entity_key: Optional[str] = Query(None),
+    to_entity_type: Optional[str] = Query(None),
+    to_entity_key: Optional[str] = Query(None),
+    dataset_key: Optional[str] = Query(None),
+    limit: int = Query(1000, ge=1, le=5000),
+    offset: int = Query(0, ge=0),
+):
+    items = store.list_domain_relationships(
+        relationship_type=relationship_type,
+        from_entity_type=from_entity_type,
+        from_entity_key=from_entity_key,
+        to_entity_type=to_entity_type,
+        to_entity_key=to_entity_key,
+        dataset_key=dataset_key,
+        limit=limit,
+        offset=offset,
+    )
+    return {
+        "items": items,
+        "limit": limit,
+        "offset": offset,
+        "count": len(items),
+    }
+
+
+@app.get("/api/v1/domain/project-view/{project_code}")
+async def get_domain_project_view(
+    project_code: str,
+    date: Optional[str] = Query(None),
+    include_work_points: bool = Query(True),
+    limit: int = Query(10000, ge=1, le=50000),
+):
+    view = store.get_project_domain_view(
+        project_code,
+        date=date,
+        include_work_points=include_work_points,
+        include_towers=True,
+        include_stations=True,
+        include_line_sections=True,
+        limit=limit,
+    )
+    if view is None:
+        raise HTTPException(status_code=404, detail=f"project not found: {project_code}")
+    return {
+        "project": view["project"],
+        "hierarchy": {
+            "single_projects": view["single_projects"],
+            "bidding_sections": view["bidding_sections"],
+            "relationships": [
+                relationship
+                for relationship in view["relationships"]
+                if relationship["relationship_type"]
+                in {"HAS_SINGLE_PROJECT", "HAS_BIDDING_SECTION", "HAS_LINE_SECTION"}
+            ],
+        },
+        "towers": view["towers"],
+        "stations": view["stations"],
+        "line_sections": view["line_sections"],
+        "work_points": view["work_points"],
+        "project_progress": view["project_progress"],
+        "summary": view["summary"],
+    }
 
 
 @app.get("/api/v1/sandbox/dates")
