@@ -435,6 +435,19 @@ def test_health_summary_reports_failed_reasons() -> None:
 def test_health_summary_warns_when_tower_sequence_points_to_missing_tower() -> None:
     store = _make_store()
     store.upsert_canonical_entity(
+        entity_type="tower",
+        entity_key="dcp:tower:S01:B01:G0",
+        dataset_key="tower",
+        source_system="dcp",
+        source_record_key="tower-warn-existing",
+        latest_raw_event_id=0,
+        latest_collected_at="2026-05-08T07:59:00+08:00",
+        latest_collected_at_epoch=0.5,
+        latest_source_record_hash="hash-tower-warn-existing",
+        source_refs=[],
+        attributes={"tower_no": "G0"},
+    )
+    store.upsert_canonical_entity(
         entity_type="line_section",
         entity_key="dcp:line_section:LS-WARN",
         dataset_key="line_section",
@@ -502,6 +515,94 @@ def test_health_summary_does_not_warn_for_reference_tower_sequence_nodes() -> No
     assert health["tower_sequence_reference_count"] == 1
     assert health["tower_sequence_missing_physical_entity_count"] == 0
     assert "tower sequence physical candidates point to missing tower entities" not in summary["reasons"]
+
+
+def test_domain_health_counts_scope_without_tower_for_missing_physical_candidates() -> None:
+    store = _make_store()
+    store.upsert_canonical_entity(
+        entity_type="line_section",
+        entity_key="dcp:line_section:LS-SCOPE-MISSING",
+        dataset_key="line_section",
+        source_system="dcp",
+        source_record_key="line-scope-missing",
+        latest_raw_event_id=1,
+        latest_collected_at="2026-05-09T08:00:00+08:00",
+        latest_collected_at_epoch=1.0,
+        latest_source_record_hash="hash-line-scope-missing",
+        source_refs=[],
+        attributes={},
+    )
+    store.upsert_canonical_relationship(
+        relationship_key="rel-tower-scope-missing",
+        relationship_type="HAS_TOWER_SEQUENCE",
+        from_entity_type="line_section",
+        from_entity_key="dcp:line_section:LS-SCOPE-MISSING",
+        to_entity_type="tower",
+        to_entity_key="dcp:tower:S01:B01:G11",
+        dataset_key="line_section",
+        source_system="dcp",
+        latest_raw_event_id=2,
+        latest_collected_at="2026-05-09T08:01:00+08:00",
+        attributes={"tower_no": "G11", "node_kind": "physical_candidate"},
+    )
+
+    health = get_domain_health(store)
+    summary = get_health_summary(store, recent_days=1)
+
+    assert health["tower_sequence_scope_without_tower_count"] == 1
+    assert health["tower_sequence_missing_physical_entity_count"] == 0
+    assert "some line-section scopes have no tower entities" in summary["reasons"]
+    assert "tower sequence physical candidates point to missing tower entities" not in summary["reasons"]
+
+
+def test_domain_health_counts_missing_physical_when_scope_has_other_towers() -> None:
+    store = _make_store()
+    store.upsert_canonical_entity(
+        entity_type="tower",
+        entity_key="dcp:tower:S01:B01:G10",
+        dataset_key="tower",
+        source_system="dcp",
+        source_record_key="tower-same-scope",
+        latest_raw_event_id=1,
+        latest_collected_at="2026-05-09T08:00:00+08:00",
+        latest_collected_at_epoch=1.0,
+        latest_source_record_hash="hash-tower-same-scope",
+        source_refs=[],
+        attributes={"tower_no": "G10"},
+    )
+    store.upsert_canonical_entity(
+        entity_type="line_section",
+        entity_key="dcp:line_section:LS-PHYSICAL-MISSING",
+        dataset_key="line_section",
+        source_system="dcp",
+        source_record_key="line-physical-missing",
+        latest_raw_event_id=2,
+        latest_collected_at="2026-05-09T08:01:00+08:00",
+        latest_collected_at_epoch=2.0,
+        latest_source_record_hash="hash-line-physical-missing",
+        source_refs=[],
+        attributes={},
+    )
+    store.upsert_canonical_relationship(
+        relationship_key="rel-tower-physical-missing",
+        relationship_type="HAS_TOWER_SEQUENCE",
+        from_entity_type="line_section",
+        from_entity_key="dcp:line_section:LS-PHYSICAL-MISSING",
+        to_entity_type="tower",
+        to_entity_key="dcp:tower:S01:B01:G11",
+        dataset_key="line_section",
+        source_system="dcp",
+        latest_raw_event_id=3,
+        latest_collected_at="2026-05-09T08:02:00+08:00",
+        attributes={"tower_no": "G11", "node_kind": "physical_candidate"},
+    )
+
+    health = get_domain_health(store)
+    summary = get_health_summary(store, recent_days=1)
+
+    assert health["tower_sequence_scope_without_tower_count"] == 0
+    assert health["tower_sequence_missing_physical_entity_count"] == 1
+    assert "tower sequence physical candidates point to missing tower entities" in summary["reasons"]
 
 
 def test_health_api_endpoints() -> None:

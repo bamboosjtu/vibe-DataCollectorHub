@@ -133,8 +133,11 @@ def _tower_sequence_node_kind(tower_no: str) -> str:
     if (
         "线#" in tower_no
         or "站" in tower_no
+        or "门架" in tower_no
         or "龙门架" in tower_no
         or "间隔" in tower_no
+        or re.search(r".*线\d+号", tower_no)
+        or re.search(r"原.*线.*号", tower_no)
         or (_contains_chinese(tower_no) and "#" in tower_no)
     ):
         return "reference_node"

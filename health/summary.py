@@ -55,6 +55,8 @@ def get_health_summary(
         warning_reasons.append(
             "tower sequence physical candidates point to missing tower entities"
         )
+    if domain_health["tower_sequence_scope_without_tower_count"] > 0:
+        warning_reasons.append("some line-section scopes have no tower entities")
 
     for key, coverage in context_health.items():
         if coverage["status"] == "failed":

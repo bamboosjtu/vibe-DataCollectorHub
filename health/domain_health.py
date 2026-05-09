@@ -30,6 +30,13 @@ def _is_unscoped_tower_key(entity_key: str) -> bool:
     return parts[:2] == ["dcp", "tower"] and len(parts) == 3
 
 
+def _tower_scope(entity_key: str) -> tuple[str, str] | None:
+    parts = str(entity_key).split(":")
+    if parts[:2] != ["dcp", "tower"] or len(parts) < 5:
+        return None
+    return parts[2], parts[3]
+
+
 def get_domain_health(store: SQLiteStore) -> dict[str, Any]:
     entities = store.list_canonical_entities(limit=100000)
     relationships = store.list_canonical_relationships(limit=100000)
@@ -37,6 +44,7 @@ def get_domain_health(store: SQLiteStore) -> dict[str, Any]:
     entity_counts = {entity_type: 0 for entity_type in ENTITY_TYPES}
     entity_identities: set[tuple[str, str]] = set()
     unscoped_tower_entity_count = 0
+    tower_scopes: set[tuple[str, str]] = set()
     for entity in entities:
         entity_type = entity["entity_type"]
         if entity_type in entity_counts:
@@ -44,12 +52,17 @@ def get_domain_health(store: SQLiteStore) -> dict[str, Any]:
         entity_identities.add((entity_type, entity["entity_key"]))
         if entity_type == "tower" and _is_unscoped_tower_key(entity["entity_key"]):
             unscoped_tower_entity_count += 1
+        if entity_type == "tower":
+            scope = _tower_scope(entity["entity_key"])
+            if scope:
+                tower_scopes.add(scope)
 
     relationship_counts = {relationship_type: 0 for relationship_type in RELATIONSHIP_TYPES}
     orphan_relationship_count = 0
     unscoped_tower_sequence_count = 0
     tower_sequence_orphan_count = 0
     tower_sequence_reference_count = 0
+    tower_sequence_scope_without_tower_count = 0
     tower_sequence_missing_physical_entity_count = 0
     project_with_single: set[str] = set()
     single_with_bidding: set[str] = set()
@@ -75,7 +88,11 @@ def get_domain_health(store: SQLiteStore) -> dict[str, Any]:
                 if attributes.get("node_kind") == "reference_node":
                     tower_sequence_reference_count += 1
                 else:
-                    tower_sequence_missing_physical_entity_count += 1
+                    scope = _tower_scope(relationship["to_entity_key"])
+                    if scope and scope not in tower_scopes:
+                        tower_sequence_scope_without_tower_count += 1
+                    else:
+                        tower_sequence_missing_physical_entity_count += 1
         if relationship_type == "HAS_SINGLE_PROJECT":
             project_with_single.add(relationship["from_entity_key"])
         if relationship_type == "HAS_BIDDING_SECTION":
@@ -117,6 +134,7 @@ def get_domain_health(store: SQLiteStore) -> dict[str, Any]:
         "unscoped_tower_entity_count": unscoped_tower_entity_count,
         "tower_sequence_orphan_count": tower_sequence_orphan_count,
         "tower_sequence_reference_count": tower_sequence_reference_count,
+        "tower_sequence_scope_without_tower_count": tower_sequence_scope_without_tower_count,
         "tower_sequence_missing_physical_entity_count": tower_sequence_missing_physical_entity_count,
         "line_section_known_issue_count": line_section_known_issue_count,
         "orphan_relationship_count": orphan_relationship_count,

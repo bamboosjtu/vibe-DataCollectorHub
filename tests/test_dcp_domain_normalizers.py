@@ -343,6 +343,60 @@ def test_section_details_marks_station_dragon_gate_nodes_as_reference_nodes() ->
     assert relationship["attributes"]["node_kind"] == "reference_node"
 
 
+def test_section_details_marks_original_line_number_nodes_as_reference_nodes() -> None:
+    store = _make_store()
+    event = _event(
+        suffix="section-details-original-line-reference",
+        dataset_key="line_section",
+        page_name="区段划分",
+        api_name="section_details",
+        raw={
+            "id": "LS-ORIGINAL-LINE-REF",
+            "sectionName": "原线路引用区段",
+            "sectionVo": {"towerNoList": [{"towerNo": "原南鹤I线115号"}]},
+        },
+        context={
+            "single_project_code": "S01",
+            "bidding_section_code": "B01",
+        },
+    )
+    store.save_raw_event(event, dataset_key="line_section")
+
+    NormalizerRunner(store).run("line_section")
+
+    relationship = store.list_canonical_relationships(
+        relationship_type="HAS_TOWER_SEQUENCE"
+    )[0]
+    assert relationship["attributes"]["node_kind"] == "reference_node"
+
+
+def test_section_details_marks_gateframe_nodes_as_reference_nodes() -> None:
+    store = _make_store()
+    event = _event(
+        suffix="section-details-gateframe-reference",
+        dataset_key="line_section",
+        page_name="区段划分",
+        api_name="section_details",
+        raw={
+            "id": "LS-GATEFRAME-REF",
+            "sectionName": "门架引用区段",
+            "sectionVo": {"towerNoList": [{"towerNo": "竹园门架"}]},
+        },
+        context={
+            "single_project_code": "S01",
+            "bidding_section_code": "B01",
+        },
+    )
+    store.save_raw_event(event, dataset_key="line_section")
+
+    NormalizerRunner(store).run("line_section")
+
+    relationship = store.list_canonical_relationships(
+        relationship_type="HAS_TOWER_SEQUENCE"
+    )[0]
+    assert relationship["attributes"]["node_kind"] == "reference_node"
+
+
 def test_flat_hierarchy_can_use_source_context_when_raw_lacks_codes() -> None:
     store = _make_store()
     event = _event(
