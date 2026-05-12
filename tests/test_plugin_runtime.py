@@ -100,7 +100,7 @@ async def test_dcp_plugin_is_external_control_only():
     assert adapter.collection_mode == "incremental"
     assert adapter.config["collector_type"] == "external"
     assert adapter.config["source_system"] == "dcp"
-    assert adapter.config["ingestion_endpoint"] == "/ingestion/v1/events"
+    assert adapter.config["ingestion_endpoint"] == "/ingestion/v1/batch"
     assert adapter.config["monitor_datasets"] == ["daily_meeting", "tower", "station"]
     assert adapter.config["enabled_datasets"] == [
         "daily_meeting",

@@ -40,7 +40,7 @@ class DcpExternalCollectorAdapter(BaseAdapter):
         "source_system": {
             "type": "string",
             "required": False,
-            "description": "SourceEvent.source_system",
+            "description": "MVP raw-layer source_system",
             "default": "dcp",
         },
         "downloader_profile": {
@@ -52,8 +52,8 @@ class DcpExternalCollectorAdapter(BaseAdapter):
         "ingestion_endpoint": {
             "type": "string",
             "required": False,
-            "description": "SourceEvent ingestion endpoint",
-            "default": "/ingestion/v1/events",
+            "description": "MVP ingestion batch endpoint",
+            "default": "/ingestion/v1/batch",
         },
         "downloader": {
             "type": "object",

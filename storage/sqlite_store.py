@@ -69,6 +69,121 @@ CREATE INDEX IF NOT EXISTS idx_raw_data_plugin ON raw_data(plugin_id);
 CREATE INDEX IF NOT EXISTS idx_raw_data_time ON raw_data(created_at);
 CREATE INDEX IF NOT EXISTS idx_raw_data_source ON raw_data(source);
 
+-- MVP command batch raw layer.
+CREATE TABLE IF NOT EXISTS collection_batches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id TEXT NOT NULL UNIQUE,
+    batch_key TEXT,
+    source_system TEXT NOT NULL,
+    plugin_id TEXT NOT NULL,
+    downloader_name TEXT NOT NULL,
+    trigger_type TEXT NOT NULL,
+    status TEXT NOT NULL,
+    schedule_key TEXT,
+    schedule_cron TEXT,
+    timezone TEXT DEFAULT 'Asia/Shanghai',
+    command_count INTEGER DEFAULT 0,
+    request_count INTEGER DEFAULT 0,
+    raw_record_count INTEGER DEFAULT 0,
+    error_count INTEGER DEFAULT 0,
+    metadata_snapshot TEXT,
+    config_snapshot TEXT,
+    result_summary TEXT,
+    error TEXT,
+    started_at TIMESTAMP,
+    finished_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS collection_commands (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    command_run_id TEXT NOT NULL UNIQUE,
+    batch_id TEXT NOT NULL,
+    command_key TEXT NOT NULL,
+    command_type TEXT NOT NULL,
+    source_system TEXT NOT NULL,
+    plugin_id TEXT NOT NULL,
+    downloader_name TEXT NOT NULL,
+    dataset_keys TEXT NOT NULL,
+    scope_selector TEXT,
+    scope_snapshot TEXT,
+    params TEXT NOT NULL DEFAULT '{}',
+    downloader_job_id TEXT,
+    status TEXT NOT NULL,
+    request_count INTEGER DEFAULT 0,
+    raw_record_count INTEGER DEFAULT 0,
+    success_request_count INTEGER DEFAULT 0,
+    failed_request_count INTEGER DEFAULT 0,
+    started_at TIMESTAMP,
+    finished_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (batch_id) REFERENCES collection_batches(batch_id)
+);
+
+CREATE TABLE IF NOT EXISTS collection_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    request_id TEXT NOT NULL UNIQUE,
+    batch_id TEXT NOT NULL,
+    command_run_id TEXT NOT NULL,
+    dataset_key TEXT NOT NULL,
+    request_key TEXT NOT NULL,
+    request_kind TEXT NOT NULL,
+    source_system TEXT NOT NULL,
+    plugin_id TEXT NOT NULL,
+    downloader_name TEXT NOT NULL,
+    api_name TEXT,
+    source_path TEXT,
+    request_params TEXT NOT NULL DEFAULT '{}',
+    request_context TEXT NOT NULL DEFAULT '{}',
+    response_meta TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL,
+    raw_record_count INTEGER DEFAULT 0,
+    error_count INTEGER DEFAULT 0,
+    requested_at TIMESTAMP,
+    completed_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (batch_id) REFERENCES collection_batches(batch_id),
+    FOREIGN KEY (command_run_id) REFERENCES collection_commands(command_run_id)
+);
+
+CREATE TABLE IF NOT EXISTS collection_errors (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    error_id TEXT NOT NULL UNIQUE,
+    batch_id TEXT,
+    command_run_id TEXT,
+    request_id TEXT,
+    raw_event_id TEXT,
+    source_system TEXT NOT NULL,
+    plugin_id TEXT,
+    downloader_name TEXT,
+    dataset_key TEXT,
+    error_stage TEXT NOT NULL,
+    error_type TEXT NOT NULL,
+    message TEXT NOT NULL,
+    details TEXT NOT NULL DEFAULT '{}',
+    retryable INTEGER DEFAULT 0,
+    occurred_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS collection_checkpoints (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    checkpoint_key TEXT NOT NULL UNIQUE,
+    source_system TEXT NOT NULL,
+    plugin_id TEXT NOT NULL,
+    dataset_key TEXT NOT NULL,
+    checkpoint_type TEXT NOT NULL,
+    checkpoint_value TEXT NOT NULL DEFAULT '{}',
+    batch_id TEXT,
+    command_run_id TEXT,
+    request_id TEXT,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Raw SourceEvent ingestion table
 CREATE TABLE IF NOT EXISTS raw_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -88,6 +203,14 @@ CREATE TABLE IF NOT EXISTS raw_events (
     page_name TEXT,
     api_name TEXT,
     source_file TEXT,
+    batch_id TEXT,
+    command_run_id TEXT,
+    request_id TEXT,
+    raw_event_id TEXT,
+    source_path TEXT,
+    record_index INTEGER,
+    raw_payload TEXT,
+    processing_status TEXT DEFAULT 'pending',
     occurred_at TIMESTAMP,
     collected_at TIMESTAMP NOT NULL,
     payload TEXT NOT NULL,
@@ -225,6 +348,10 @@ CREATE INDEX IF NOT EXISTS idx_external_collection_jobs_plugin_status ON externa
 CREATE INDEX IF NOT EXISTS idx_external_collection_jobs_created_at ON external_collection_jobs(created_at);
 CREATE INDEX IF NOT EXISTS idx_collection_schedules_plugin_enabled ON collection_schedules(plugin_id, enabled);
 CREATE INDEX IF NOT EXISTS idx_collection_schedules_next_run_at ON collection_schedules(next_run_at);
+CREATE INDEX IF NOT EXISTS idx_collection_commands_batch ON collection_commands(batch_id);
+CREATE INDEX IF NOT EXISTS idx_collection_requests_batch_command ON collection_requests(batch_id, command_run_id);
+CREATE INDEX IF NOT EXISTS idx_collection_errors_batch ON collection_errors(batch_id);
+CREATE INDEX IF NOT EXISTS idx_collection_checkpoints_dataset ON collection_checkpoints(dataset_key);
 CREATE INDEX IF NOT EXISTS idx_canonical_entities_type_dataset ON canonical_entities(entity_type, dataset_key);
 CREATE INDEX IF NOT EXISTS idx_canonical_relationships_type ON canonical_relationships(relationship_type);
 CREATE INDEX IF NOT EXISTS idx_canonical_relationships_from ON canonical_relationships(from_entity_type, from_entity_key);
@@ -319,6 +446,14 @@ class SQLiteStore:
             self._ensure_column(conn, "raw_events", "page_name", "TEXT")
             self._ensure_column(conn, "raw_events", "api_name", "TEXT")
             self._ensure_column(conn, "raw_events", "source_file", "TEXT")
+            self._ensure_column(conn, "raw_events", "batch_id", "TEXT")
+            self._ensure_column(conn, "raw_events", "command_run_id", "TEXT")
+            self._ensure_column(conn, "raw_events", "request_id", "TEXT")
+            self._ensure_column(conn, "raw_events", "raw_event_id", "TEXT")
+            self._ensure_column(conn, "raw_events", "source_path", "TEXT")
+            self._ensure_column(conn, "raw_events", "record_index", "INTEGER")
+            self._ensure_column(conn, "raw_events", "raw_payload", "TEXT")
+            self._ensure_column(conn, "raw_events", "processing_status", "TEXT DEFAULT 'pending'")
             self._ensure_column(conn, "raw_events", "occurred_at_epoch", "REAL")
             self._ensure_column(conn, "raw_events", "collected_at_epoch", "REAL")
             if self._has_unique_index_on_columns(conn, "raw_events", ["idempotency_key"]):
@@ -355,6 +490,24 @@ class SQLiteStore:
             )
             conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_events_raw_event_key ON raw_events(raw_event_key)"
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_events_raw_event_id ON raw_events(raw_event_id) WHERE raw_event_id IS NOT NULL"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_raw_events_batch_request ON raw_events(batch_id, command_run_id, request_id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_collection_commands_batch ON collection_commands(batch_id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_collection_requests_batch_command ON collection_requests(batch_id, command_run_id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_collection_errors_batch ON collection_errors(batch_id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_collection_checkpoints_dataset ON collection_checkpoints(dataset_key)"
             )
             self._ensure_column(conn, "canonical_entities", "latest_collected_at", "TIMESTAMP")
             self._ensure_column(conn, "canonical_entities", "entity_date", "TEXT")
@@ -1056,6 +1209,398 @@ class SQLiteStore:
                 params,
             )
             return [self._decode_raw_event_row(row) for row in cursor.fetchall()]
+        finally:
+            conn.close()
+
+    # --- MVP ingestion batch raw-layer operations ---
+
+    @staticmethod
+    def _json_text(value: Any, default: Any) -> str:
+        if value is None:
+            value = default
+        return json.dumps(value, ensure_ascii=False, default=str)
+
+    def save_ingestion_batch(self, batch_payload: Dict[str, Any]) -> Dict[str, int]:
+        """
+        Persist an ingestion.batch.v1 payload.
+
+        The MVP path stores command batches, commands, requests, raw records,
+        errors, and checkpoints. Each raw_event row represents one business
+        record produced by one collection_request.
+        """
+        conn = self._get_connection()
+        stats = {
+            "collection_batches_upserted": 0,
+            "collection_commands_upserted": 0,
+            "collection_requests_upserted": 0,
+            "raw_events_inserted": 0,
+            "raw_events_duplicated": 0,
+            "collection_errors_inserted": 0,
+            "collection_errors_duplicated": 0,
+            "collection_checkpoints_upserted": 0,
+        }
+        try:
+            batch = batch_payload["batch"]
+            commands = batch_payload.get("commands") or []
+            requests = batch_payload.get("requests") or []
+            raw_events = batch_payload.get("raw_events") or []
+            errors = batch_payload.get("errors") or []
+            checkpoints = batch_payload.get("checkpoints") or []
+            request_context_by_id = {
+                request.get("request_id"): request.get("request_context") or {}
+                for request in requests
+                if isinstance(request, dict)
+            }
+
+            conn.execute(
+                """
+                INSERT INTO collection_batches (
+                    batch_id, batch_key, source_system, plugin_id, downloader_name,
+                    trigger_type, status, schedule_key, schedule_cron, timezone,
+                    command_count, request_count, raw_record_count, error_count,
+                    metadata_snapshot, config_snapshot, result_summary, error,
+                    started_at, finished_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(batch_id) DO UPDATE SET
+                    batch_key=excluded.batch_key,
+                    source_system=excluded.source_system,
+                    plugin_id=excluded.plugin_id,
+                    downloader_name=excluded.downloader_name,
+                    trigger_type=excluded.trigger_type,
+                    status=excluded.status,
+                    schedule_key=excluded.schedule_key,
+                    schedule_cron=excluded.schedule_cron,
+                    timezone=excluded.timezone,
+                    command_count=excluded.command_count,
+                    request_count=excluded.request_count,
+                    raw_record_count=excluded.raw_record_count,
+                    error_count=excluded.error_count,
+                    metadata_snapshot=excluded.metadata_snapshot,
+                    config_snapshot=excluded.config_snapshot,
+                    result_summary=excluded.result_summary,
+                    error=excluded.error,
+                    started_at=excluded.started_at,
+                    finished_at=excluded.finished_at,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    batch["batch_id"],
+                    batch.get("batch_key"),
+                    batch["source_system"],
+                    batch["plugin_id"],
+                    batch["downloader_name"],
+                    batch["trigger_type"],
+                    batch["status"],
+                    batch.get("schedule_key"),
+                    batch.get("schedule_cron"),
+                    batch.get("timezone", "Asia/Shanghai"),
+                    batch.get("command_count", len(commands)),
+                    batch.get("request_count", len(requests)),
+                    batch.get("raw_record_count", len(raw_events)),
+                    batch.get("error_count", len(errors)),
+                    self._json_text(batch.get("metadata_snapshot"), {}),
+                    self._json_text(batch.get("config_snapshot"), {}),
+                    self._json_text(batch.get("result_summary"), {}),
+                    batch.get("error"),
+                    batch.get("started_at"),
+                    batch.get("finished_at"),
+                    datetime.now(),
+                ),
+            )
+            stats["collection_batches_upserted"] = 1
+
+            for command in commands:
+                conn.execute(
+                    """
+                    INSERT INTO collection_commands (
+                        command_run_id, batch_id, command_key, command_type,
+                        source_system, plugin_id, downloader_name, dataset_keys,
+                        scope_selector, scope_snapshot, params, downloader_job_id,
+                        status, request_count, raw_record_count,
+                        success_request_count, failed_request_count,
+                        started_at, finished_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(command_run_id) DO UPDATE SET
+                        batch_id=excluded.batch_id,
+                        command_key=excluded.command_key,
+                        command_type=excluded.command_type,
+                        source_system=excluded.source_system,
+                        plugin_id=excluded.plugin_id,
+                        downloader_name=excluded.downloader_name,
+                        dataset_keys=excluded.dataset_keys,
+                        scope_selector=excluded.scope_selector,
+                        scope_snapshot=excluded.scope_snapshot,
+                        params=excluded.params,
+                        downloader_job_id=excluded.downloader_job_id,
+                        status=excluded.status,
+                        request_count=excluded.request_count,
+                        raw_record_count=excluded.raw_record_count,
+                        success_request_count=excluded.success_request_count,
+                        failed_request_count=excluded.failed_request_count,
+                        started_at=excluded.started_at,
+                        finished_at=excluded.finished_at,
+                        updated_at=excluded.updated_at
+                    """,
+                    (
+                        command["command_run_id"],
+                        command["batch_id"],
+                        command["command_key"],
+                        command["command_type"],
+                        command["source_system"],
+                        command["plugin_id"],
+                        command["downloader_name"],
+                        self._json_text(command.get("dataset_keys"), []),
+                        self._json_text(command.get("scope_selector"), None),
+                        self._json_text(command.get("scope_snapshot"), None),
+                        self._json_text(command.get("params"), {}),
+                        command.get("downloader_job_id"),
+                        command["status"],
+                        command.get("request_count", 0),
+                        command.get("raw_record_count", 0),
+                        command.get("success_request_count", 0),
+                        command.get("failed_request_count", 0),
+                        command.get("started_at"),
+                        command.get("finished_at"),
+                        datetime.now(),
+                    ),
+                )
+                stats["collection_commands_upserted"] += 1
+
+            for request in requests:
+                conn.execute(
+                    """
+                    INSERT INTO collection_requests (
+                        request_id, batch_id, command_run_id, dataset_key,
+                        request_key, request_kind, source_system, plugin_id,
+                        downloader_name, api_name, source_path, request_params,
+                        request_context, response_meta, status, raw_record_count,
+                        error_count, requested_at, completed_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(request_id) DO UPDATE SET
+                        batch_id=excluded.batch_id,
+                        command_run_id=excluded.command_run_id,
+                        dataset_key=excluded.dataset_key,
+                        request_key=excluded.request_key,
+                        request_kind=excluded.request_kind,
+                        source_system=excluded.source_system,
+                        plugin_id=excluded.plugin_id,
+                        downloader_name=excluded.downloader_name,
+                        api_name=excluded.api_name,
+                        source_path=excluded.source_path,
+                        request_params=excluded.request_params,
+                        request_context=excluded.request_context,
+                        response_meta=excluded.response_meta,
+                        status=excluded.status,
+                        raw_record_count=excluded.raw_record_count,
+                        error_count=excluded.error_count,
+                        requested_at=excluded.requested_at,
+                        completed_at=excluded.completed_at,
+                        updated_at=excluded.updated_at
+                    """,
+                    (
+                        request["request_id"],
+                        request["batch_id"],
+                        request["command_run_id"],
+                        request["dataset_key"],
+                        request["request_key"],
+                        request["request_kind"],
+                        request["source_system"],
+                        request["plugin_id"],
+                        request["downloader_name"],
+                        request.get("api_name"),
+                        request.get("source_path"),
+                        self._json_text(request.get("request_params"), {}),
+                        self._json_text(request.get("request_context"), {}),
+                        self._json_text(request.get("response_meta"), {}),
+                        request["status"],
+                        request.get("raw_record_count", 0),
+                        request.get("error_count", 0),
+                        request.get("requested_at"),
+                        request.get("completed_at"),
+                        datetime.now(),
+                    ),
+                )
+                stats["collection_requests_upserted"] += 1
+
+            for raw_event in raw_events:
+                raw_event_id = raw_event["raw_event_id"]
+                existing = conn.execute(
+                    "SELECT id FROM raw_events WHERE raw_event_id = ?",
+                    (raw_event_id,),
+                ).fetchone()
+                if existing:
+                    stats["raw_events_duplicated"] += 1
+                    continue
+                raw_payload = raw_event.get("raw_payload") or {}
+                source_record_hash = raw_event.get("source_record_hash")
+                raw_event_key = raw_event.get("raw_event_key") or raw_event_id
+                source_record_key = (
+                    raw_event.get("source_record_key")
+                    or f"{raw_event['source_system']}:{raw_event['dataset_key']}:{raw_event.get('source_record_id') or raw_event_id}"
+                )
+                request_context = dict(request_context_by_id.get(raw_event["request_id"]) or {})
+                request_context.update(raw_event.get("request_context") or {})
+                source_ref = {
+                    "batch_id": raw_event["batch_id"],
+                    "command_run_id": raw_event["command_run_id"],
+                    "request_id": raw_event["request_id"],
+                    "source_path": raw_event.get("source_path"),
+                    "record_index": raw_event.get("record_index"),
+                    "collection": raw_event.get("collection"),
+                    "page_name": raw_event.get("page_name"),
+                    "api_name": raw_event.get("api_name"),
+                    "source_file": raw_event.get("source_file"),
+                }
+                if request_context:
+                    source_ref["context"] = request_context
+                event_doc = {
+                    "schema_version": "raw_event.v1",
+                    **raw_event,
+                }
+                conn.execute(
+                    """
+                    INSERT INTO raw_events (
+                        event_id, idempotency_key, source_record_key, raw_event_key,
+                        source_system, source_event_type, event_granularity,
+                        source_record_id, source_record_hash,
+                        occurred_at_epoch, collected_at_epoch,
+                        dataset_key, collection, page_name, api_name, source_file,
+                        batch_id, command_run_id, request_id, raw_event_id,
+                        source_path, record_index, raw_payload, processing_status,
+                        occurred_at, collected_at, payload, source_ref, event, created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        raw_event_id,
+                        raw_event_key,
+                        source_record_key,
+                        raw_event_key,
+                        raw_event["source_system"],
+                        f"{raw_event['source_system']}.record",
+                        "record",
+                        raw_event.get("source_record_id"),
+                        source_record_hash,
+                        self._timestamp_epoch(raw_event.get("occurred_at")),
+                        self._timestamp_epoch(raw_event.get("collected_at")),
+                        raw_event["dataset_key"],
+                        raw_event.get("collection"),
+                        raw_event.get("page_name"),
+                        raw_event.get("api_name"),
+                        raw_event.get("source_file"),
+                        raw_event["batch_id"],
+                        raw_event["command_run_id"],
+                        raw_event["request_id"],
+                        raw_event_id,
+                        raw_event.get("source_path"),
+                        raw_event.get("record_index"),
+                        self._json_text(raw_payload, {}),
+                        raw_event.get("processing_status", "pending"),
+                        raw_event.get("occurred_at"),
+                        raw_event["collected_at"],
+                        self._json_text({"raw": raw_payload}, {}),
+                        self._json_text(source_ref, {}),
+                        self._json_text(event_doc, {}),
+                        datetime.now(),
+                    ),
+                )
+                stats["raw_events_inserted"] += 1
+
+            for error in errors:
+                cursor = conn.execute(
+                    """
+                    INSERT OR IGNORE INTO collection_errors (
+                        error_id, batch_id, command_run_id, request_id, raw_event_id,
+                        source_system, plugin_id, downloader_name, dataset_key,
+                        error_stage, error_type, message, details, retryable,
+                        occurred_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        error["error_id"],
+                        error.get("batch_id"),
+                        error.get("command_run_id"),
+                        error.get("request_id"),
+                        error.get("raw_event_id"),
+                        error["source_system"],
+                        error.get("plugin_id"),
+                        error.get("downloader_name"),
+                        error.get("dataset_key"),
+                        error["error_stage"],
+                        error["error_type"],
+                        error["message"],
+                        self._json_text(error.get("details"), {}),
+                        1 if error.get("retryable") else 0,
+                        error.get("occurred_at"),
+                    ),
+                )
+                if cursor.rowcount:
+                    stats["collection_errors_inserted"] += 1
+                else:
+                    stats["collection_errors_duplicated"] += 1
+
+            for checkpoint in checkpoints:
+                conn.execute(
+                    """
+                    INSERT INTO collection_checkpoints (
+                        checkpoint_key, source_system, plugin_id, dataset_key,
+                        checkpoint_type, checkpoint_value, batch_id,
+                        command_run_id, request_id, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(checkpoint_key) DO UPDATE SET
+                        source_system=excluded.source_system,
+                        plugin_id=excluded.plugin_id,
+                        dataset_key=excluded.dataset_key,
+                        checkpoint_type=excluded.checkpoint_type,
+                        checkpoint_value=excluded.checkpoint_value,
+                        batch_id=excluded.batch_id,
+                        command_run_id=excluded.command_run_id,
+                        request_id=excluded.request_id,
+                        updated_at=excluded.updated_at
+                    """,
+                    (
+                        checkpoint["checkpoint_key"],
+                        checkpoint["source_system"],
+                        checkpoint["plugin_id"],
+                        checkpoint["dataset_key"],
+                        checkpoint["checkpoint_type"],
+                        self._json_text(checkpoint.get("checkpoint_value"), {}),
+                        checkpoint.get("batch_id"),
+                        checkpoint.get("command_run_id"),
+                        checkpoint.get("request_id"),
+                        datetime.now(),
+                    ),
+                )
+                stats["collection_checkpoints_upserted"] += 1
+
+            conn.commit()
+            return stats
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def count_table_rows(self, table_name: str) -> int:
+        allowed = {
+            "collection_batches",
+            "collection_commands",
+            "collection_requests",
+            "raw_events",
+            "collection_errors",
+            "collection_checkpoints",
+        }
+        if table_name not in allowed:
+            raise ValueError(f"unsupported table for count: {table_name}")
+        conn = self._get_connection()
+        try:
+            cursor = conn.execute(f"SELECT COUNT(*) AS count FROM {table_name}")
+            return int(cursor.fetchone()["count"])
         finally:
             conn.close()
 

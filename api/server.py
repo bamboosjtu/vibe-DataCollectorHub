@@ -158,6 +158,157 @@ class IngestionResponse(BaseModel):
     errors: List[IngestionError]
 
 
+class CollectionBatchV1(BaseModel):
+    schema_version: str = "collection_batch.v1"
+    batch_id: str
+    batch_key: Optional[str] = None
+    source_system: str
+    plugin_id: str
+    downloader_name: str
+    trigger_type: str
+    status: str
+    schedule_key: Optional[str] = None
+    schedule_cron: Optional[str] = None
+    timezone: str = "Asia/Shanghai"
+    command_count: int = 0
+    request_count: int = 0
+    raw_record_count: int = 0
+    error_count: int = 0
+    metadata_snapshot: Dict[str, Any] = Field(default_factory=dict)
+    config_snapshot: Dict[str, Any] = Field(default_factory=dict)
+    result_summary: Dict[str, Any] = Field(default_factory=dict)
+    error: Optional[str] = None
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None
+
+
+class CollectionCommandV1(BaseModel):
+    schema_version: str = "collection_command.v1"
+    command_run_id: str
+    batch_id: str
+    command_key: str
+    command_type: str
+    source_system: str
+    plugin_id: str
+    downloader_name: str
+    dataset_keys: List[str]
+    scope_selector: Optional[Dict[str, Any]] = None
+    scope_snapshot: Optional[Dict[str, Any]] = None
+    params: Dict[str, Any] = Field(default_factory=dict)
+    downloader_job_id: Optional[str] = None
+    status: str
+    request_count: int = 0
+    raw_record_count: int = 0
+    success_request_count: int = 0
+    failed_request_count: int = 0
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None
+
+
+class CollectionRequestV1(BaseModel):
+    schema_version: str = "collection_request.v1"
+    request_id: str
+    batch_id: str
+    command_run_id: str
+    dataset_key: str
+    request_key: str
+    request_kind: str
+    source_system: str
+    plugin_id: str
+    downloader_name: str
+    api_name: Optional[str] = None
+    source_path: Optional[str] = None
+    request_params: Dict[str, Any] = Field(default_factory=dict)
+    request_context: Dict[str, Any] = Field(default_factory=dict)
+    response_meta: Dict[str, Any] = Field(default_factory=dict)
+    status: str
+    raw_record_count: int = 0
+    error_count: int = 0
+    requested_at: Optional[str] = None
+    completed_at: Optional[str] = None
+
+
+class RawEventV1(BaseModel):
+    schema_version: str = "raw_event.v1"
+    raw_event_id: str
+    batch_id: str
+    command_run_id: str
+    request_id: str
+    dataset_key: str
+    source_system: str
+    plugin_id: str
+    downloader_name: str
+    source_record_id: Optional[str] = None
+    source_record_hash: Optional[str] = None
+    source_record_key: Optional[str] = None
+    raw_event_key: Optional[str] = None
+    source_path: Optional[str] = None
+    record_index: Optional[int] = None
+    collection: Optional[str] = None
+    page_name: Optional[str] = None
+    api_name: Optional[str] = None
+    source_file: Optional[str] = None
+    request_context: Dict[str, Any] = Field(default_factory=dict)
+    raw_payload: Dict[str, Any]
+    occurred_at: Optional[str] = None
+    collected_at: str
+    processing_status: str = "pending"
+
+
+class CollectionErrorV1(BaseModel):
+    schema_version: str = "collection_error.v1"
+    error_id: str
+    source_system: str
+    plugin_id: Optional[str] = None
+    downloader_name: Optional[str] = None
+    batch_id: Optional[str] = None
+    command_run_id: Optional[str] = None
+    request_id: Optional[str] = None
+    raw_event_id: Optional[str] = None
+    dataset_key: Optional[str] = None
+    error_stage: str
+    error_type: str
+    message: str
+    details: Dict[str, Any] = Field(default_factory=dict)
+    retryable: bool = False
+    occurred_at: Optional[str] = None
+
+
+class CollectionCheckpointV1(BaseModel):
+    schema_version: str = "collection_checkpoint.v1"
+    checkpoint_key: str
+    source_system: str
+    plugin_id: str
+    dataset_key: str
+    checkpoint_type: str
+    checkpoint_value: Dict[str, Any] = Field(default_factory=dict)
+    batch_id: Optional[str] = None
+    command_run_id: Optional[str] = None
+    request_id: Optional[str] = None
+
+
+class IngestionBatchV1(BaseModel):
+    schema_version: str = "ingestion.batch.v1"
+    batch: CollectionBatchV1
+    commands: List[CollectionCommandV1]
+    requests: List[CollectionRequestV1]
+    raw_events: List[RawEventV1]
+    errors: List[CollectionErrorV1] = Field(default_factory=list)
+    checkpoints: List[CollectionCheckpointV1] = Field(default_factory=list)
+
+
+class IngestionBatchResponse(BaseModel):
+    accepted: bool
+    collection_batches_upserted: int
+    collection_commands_upserted: int
+    collection_requests_upserted: int
+    raw_events_inserted: int
+    raw_events_duplicated: int
+    collection_errors_inserted: int
+    collection_errors_duplicated: int
+    collection_checkpoints_upserted: int
+
+
 class ProcessingRunRequest(BaseModel):
     """Manual foreground/debug processing run request."""
 
@@ -1054,7 +1205,7 @@ def build_downloader_command(
         "python",
         "-m",
         python_module,
-        "collect-sync",
+        "sync",
         *dataset_keys,
         "--datahub-url",
         datahub_url,
@@ -1063,18 +1214,8 @@ def build_downloader_command(
         "--processing-mode",
         processing_mode,
     ]
-    if recent_days is not None:
-        command.extend(["--recent-days", str(recent_days)])
     if since_date:
         command.extend(["--since-date", since_date])
-    if until_date:
-        command.extend(["--until-date", until_date])
-    if include_existing:
-        command.append("--include-existing")
-    if force:
-        command.append("--force")
-    if due_only:
-        command.append("--due-only")
     return command
 
 
@@ -1133,10 +1274,44 @@ def _run_external_collection_job(
         job_store.close()
 
 
-@app.post("/ingestion/v1/events", response_model=IngestionResponse)
+@app.post("/ingestion/v1/batch", response_model=IngestionBatchResponse)
+async def ingest_batch_v1(batch: IngestionBatchV1):
+    """
+    Ingest the MVP raw-layer batch model.
+
+    Release ingestion uses command batches, commands, requests, and one
+    raw_events row per original business record.
+    """
+    if store is None:
+        raise HTTPException(status_code=503, detail="storage is not initialized")
+
+    command_ids = {command.command_run_id for command in batch.commands}
+    if not command_ids:
+        raise HTTPException(status_code=400, detail="at least one command is required")
+    if any(command.batch_id != batch.batch.batch_id for command in batch.commands):
+        raise HTTPException(status_code=400, detail="all commands must reference batch.batch_id")
+    if any(request.command_run_id not in command_ids for request in batch.requests):
+        raise HTTPException(status_code=400, detail="all requests must reference a submitted command")
+
+    request_ids = {request.request_id for request in batch.requests}
+    if any(raw_event.request_id not in request_ids for raw_event in batch.raw_events):
+        raise HTTPException(status_code=400, detail="all raw_events must reference a submitted request")
+    if any(raw_event.batch_id != batch.batch.batch_id for raw_event in batch.raw_events):
+        raise HTTPException(status_code=400, detail="all raw_events must reference batch.batch_id")
+
+    payload = batch.model_dump()
+    try:
+        stats = store.save_ingestion_batch(payload)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return IngestionBatchResponse(accepted=True, **stats)
+
+
 async def ingest_source_events(body: Any = Body(...)):
     """
-    Ingest SourceEvent v1 events into raw_events.
+    Legacy SourceEvent ingestion helper retained only until old tests and
+    normalizers are migrated. It is intentionally not registered as an API
+    route; release ingestion is POST /ingestion/v1/batch.
 
     This endpoint only validates and stores raw ingestion events. It does not
     normalize, schedule, cache, or serve consumer DTOs.
@@ -2391,7 +2566,7 @@ async def root():
             "/api/data",
             "/api/data/normalized",
             "/api/stats",
-            "/ingestion/v1/events",
+            "/ingestion/v1/batch",
             "/feed/rss",
             "/ws/stream",
             "/ws/stats",

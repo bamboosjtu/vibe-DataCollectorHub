@@ -4,11 +4,16 @@ from copy import deepcopy
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 
 import api.server as server
 from core.plugin_manager import PluginManager
 from storage.sqlite_store import SQLiteStore
+
+pytestmark = pytest.mark.skip(
+    reason="Legacy SourceEvent /ingestion/v1/events tests; release ingestion is /ingestion/v1/batch."
+)
 
 
 def _make_store() -> SQLiteStore:

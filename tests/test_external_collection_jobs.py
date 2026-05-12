@@ -39,7 +39,7 @@ def _command() -> list[str]:
         "python",
         "-m",
         "app.commands.dcp_datahub",
-        "collect-sync",
+        "sync",
         "daily_meeting",
         "--datahub-url",
         "http://127.0.0.1:8000",
@@ -209,8 +209,8 @@ def test_profile_monitor_daily_expands_defaults(monkeypatch) -> None:
     assert body["dataset_keys"] == ["daily_meeting"]
     assert body["recent_days"] == 3
     assert body["processing_mode"] == "async"
-    assert "--recent-days" in body["command"]
-    assert "3" in body["command"]
+    assert body["command"][5] == "sync"
+    assert "--recent-days" not in body["command"]
 
 
 def test_explicit_dataset_keys_override_profile(monkeypatch) -> None:
@@ -255,13 +255,13 @@ def test_downloader_command_uses_new_dcp_datahub_module() -> None:
         "python",
         "-m",
         "app.commands.dcp_datahub",
-        "collect-sync",
+        "sync",
     ]
     assert "app.collector.datahub_sync" not in command
     assert "--since-date" in command
-    assert "--include-existing" in command
-    assert "--force" in command
-    assert "--due-only" in command
+    assert "--include-existing" not in command
+    assert "--force" not in command
+    assert "--due-only" not in command
 
 
 def test_background_job_uses_mocked_subprocess_and_saves_result(monkeypatch) -> None:

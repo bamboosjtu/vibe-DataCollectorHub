@@ -27,7 +27,7 @@
 │              ┌─────────────────────────────┐                     │
 │              │   Data Collector Hub        │                     │
 │              │   ┌─────────────────────┐   │                     │
-│              │   │  Ingestion API      │   │  ← SourceEvent接入  │
+│              │   │  Ingestion API      │   │  ← Ingestion Batch V1 │
 │              │   │  Plugin Pipeline    │   │  ← 插件采集管道     │
 │              │   │  Normalizer Runner  │   │  ← 归一化处理       │
 │              │   │  Canonical Store    │   │  ← 实体存储         │
@@ -52,7 +52,7 @@
 ```
 
 **核心设计原则**：
-- **DCP 只是其中一个上游采集平台**，通过 SourceEvent 标准化接入
+- **DCP 只是其中一个上游采集平台**，通过 `POST /ingestion/v1/batch` 标准化接入
 - **数字沙盘只是其中一个下游应用**，通过 Sandbox API 消费数据
 - 系统保持开放，支持任意上游数据源和下游消费方
 
@@ -76,7 +76,7 @@
 ### 数据管道
 - **多层数据架构**：
   - `raw_data`：插件采集的原始数据
-  - `raw_events`：上游系统推送的标准化 SourceEvent
+  - `raw_events`：`collection_requests` 拆分后的一条原始业务记录一行
   - `normalized_data`：轻量级规范化数据
   - `canonical_entities`：下游应用消费的实体数据
   - `canonical_relationships`：DCP 等领域实体之间的当前关系
@@ -92,7 +92,7 @@ P3 起，DCP normalizer 支持一个 raw_event 产出多个领域实体和关系
 - 关系：`HAS_SINGLE_PROJECT`、`HAS_BIDDING_SECTION`、`HAS_TOWER_SEQUENCE`、`HAS_PROJECT_PROGRESS`
 - Monitor MVP 仍只消费既有 Sandbox API；`line_section` / `year_progress` 不暴露给 Monitor。
 
-Known issue：部分 `section_details` SourceEvent 只有响应记录，缺少请求上下文中的 `prjCode`、`singleProjectCode`、`biddingSectionCode`。DataHub 不会硬猜这类关系，只会在 `line_section.attributes.known_issues` 标记。downloader 后续应在 `source_ref.context` 中补齐：
+Known issue：部分 `section_details` raw_event 只有响应记录，缺少请求上下文中的 `prjCode`、`singleProjectCode`、`biddingSectionCode`。DataHub 不会硬猜这类关系，只会在 `line_section.attributes.known_issues` 标记。downloader 后续应在 request context 中补齐：
 
 - `prjCode`
 - `singleProjectCode`
@@ -192,11 +192,11 @@ uv run python tests/scripts/test_websocket_verification.py
 | `/api/data/normalized` | GET | 查询 normalized_data（规范化数据） |
 | `/api/stats` | GET | 系统统计信息 |
 
-### SourceEvent 接入
+### Ingestion Batch V1 接入
 
 | 端点 | 方法 | 说明 |
 |------|------|------|
-| `/ingestion/v1/events` | POST | 批量接入上游 SourceEvent |
+| `/ingestion/v1/batch` | POST | 批量接入 collection batch / command / request / raw_event |
 
 ### 归一化处理
 
@@ -228,7 +228,7 @@ uv run python tests/scripts/test_websocket_verification.py
 | `/health/v1/jobs` | GET | external collection jobs / processing jobs 健康统计 |
 | `/health/v1/domain` | GET | 领域实体/关系与完整性检查 |
 | `/health/v1/daily-meeting` | GET | 最近 N 天 daily_meeting 日期覆盖情况 |
-| `/health/v1/context` | GET | SourceEvent context 覆盖率检查 |
+| `/health/v1/context` | GET | raw_event context 覆盖率检查 |
 
 ### Sandbox API（下游应用）
 
@@ -413,18 +413,18 @@ class ExternalCollectorAdapter(BaseAdapter):
 └─────────────┘
 ```
 
-### SourceEvent 接入数据流（如 DCP）
+### Ingestion Batch V1 接入数据流（如 DCP）
 
 ```
 ┌─────────────────┐
 │ 上游系统        │
 │ (vibe-downloader)│
 └────────┬────────┘
-         │ POST /ingestion/v1/events
+         │ POST /ingestion/v1/batch
          ▼
 ┌─────────────────┐
-│ SourceEvent     │
-│ 校验 + 解析     │
+│ ingestion.batch │
+│ 校验 + 入库     │
 └────────┬────────┘
          ▼
 ┌─────────────────┐
@@ -448,7 +448,7 @@ class ExternalCollectorAdapter(BaseAdapter):
 ### 功能特性
 
 - **插件状态**：查看所有插件的启用状态和健康状态
-- **数据浏览**：查看原始数据、SourceEvent、规范化数据、实体数据
+- **数据浏览**：查看原始数据、raw_events、规范化数据、实体数据
 - **任务统计**：采集成功率、失败次数等统计信息
 - **日志查看**：实时查看系统日志
 - **运行时配置**：管理插件运行时配置（如 DCP 数据集开关）
@@ -546,7 +546,7 @@ uv run python tests/scripts/test_api.py
 - ✅ RSS Feed
 - ✅ WebSocket
 - ✅ MCP
-- ✅ SourceEvent Ingestion
+- ✅ Ingestion Batch V1
 - ✅ Normalizer Runner
 - ✅ External Collection Jobs / Schedules
 - ✅ Data Health API / CLI
