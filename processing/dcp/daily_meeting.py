@@ -125,6 +125,21 @@ def _source_file_work_date(raw_event: dict[str, Any]) -> str | None:
         return None
 
 
+def _context_work_date(raw_event: dict[str, Any], raw: dict[str, Any]) -> str | None:
+    context = _source_context(raw_event)
+    for value in (
+        context.get("date"),
+        context.get("work_date"),
+        raw.get("workDate"),
+        raw.get("meetingDate"),
+        raw.get("currentConstrDate"),
+    ):
+        normalized = _normalize_work_date(value)
+        if normalized is not None:
+            return normalized
+    return None
+
+
 def _normalize_risk_level(value: Any) -> str:
     if value in (None, ""):
         return "unknown"
@@ -240,7 +255,9 @@ def normalize_daily_meeting(
         return None, "missing work point identity"
     work_date = _source_file_work_date(raw_event)
     if work_date is None:
-        return None, "invalid source_file work_date"
+        work_date = _context_work_date(raw_event, raw)
+    if work_date is None:
+        return None, "invalid source_file/context work_date"
 
     person_count = _int_value(
         _first_present(

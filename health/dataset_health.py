@@ -98,24 +98,23 @@ def get_dataset_health(store: SQLiteStore) -> dict[str, Any]:
                 }
             )
 
-        cursor = conn.execute(
-            """
-            SELECT dataset_key, page_name, api_name, COUNT(*) AS count
-            FROM raw_events
-            WHERE dataset_key IS NOT NULL
-            GROUP BY dataset_key, page_name, api_name
-            ORDER BY dataset_key, page_name, api_name
-            """
-        )
-        for row in cursor.fetchall():
-            dataset_key = row["dataset_key"]
+        api_counts: dict[tuple[str, Any, Any], int] = defaultdict(int)
+        for raw_event in store.list_raw_events(limit=100000):
+            dataset_key = raw_event.get("dataset_key")
             if dataset_key not in datasets:
                 continue
+            key = (
+                dataset_key,
+                raw_event.get("page_name"),
+                raw_event.get("api_name"),
+            )
+            api_counts[key] += 1
+        for (dataset_key, page_name, api_name), count in sorted(api_counts.items()):
             datasets[dataset_key]["api_breakdown"].append(
                 {
-                    "page_name": row["page_name"],
-                    "api_name": row["api_name"],
-                    "count": row["count"],
+                    "page_name": page_name,
+                    "api_name": api_name,
+                    "count": count,
                 }
             )
 
@@ -334,4 +333,3 @@ def get_context_coverage(store: SQLiteStore) -> dict[str, Any]:
             ),
         },
     }
-

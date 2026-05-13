@@ -10,6 +10,7 @@ Assumptions:
 
 import sqlite3
 import json
+import hashlib
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any, List
@@ -115,6 +116,10 @@ CREATE TABLE IF NOT EXISTS collection_commands (
     raw_record_count INTEGER DEFAULT 0,
     success_request_count INTEGER DEFAULT 0,
     failed_request_count INTEGER DEFAULT 0,
+    error_count INTEGER DEFAULT 0,
+    processing_policy TEXT,
+    result_summary TEXT,
+    error TEXT,
     started_at TIMESTAMP,
     finished_at TIMESTAMP,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -184,38 +189,28 @@ CREATE TABLE IF NOT EXISTS collection_checkpoints (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Raw SourceEvent ingestion table
+-- MVP raw event table. One row is one original business record.
 CREATE TABLE IF NOT EXISTS raw_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    event_id TEXT NOT NULL,
-    idempotency_key TEXT NOT NULL,
-    source_record_key TEXT NOT NULL,
-    raw_event_key TEXT NOT NULL,
-    source_system TEXT NOT NULL,
-    source_event_type TEXT NOT NULL,
-    event_granularity TEXT NOT NULL,
+    raw_event_key TEXT NOT NULL UNIQUE,
+    raw_event_id TEXT UNIQUE,
+    batch_id TEXT NOT NULL,
+    command_run_id TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    dataset_key TEXT NOT NULL,
+    raw_record_type TEXT,
+    raw_record TEXT NOT NULL,
+    source_path TEXT,
     source_record_id TEXT,
     source_record_hash TEXT,
-    occurred_at_epoch REAL,
-    collected_at_epoch REAL,
-    dataset_key TEXT,
-    collection TEXT,
-    page_name TEXT,
-    api_name TEXT,
-    source_file TEXT,
-    batch_id TEXT,
-    command_run_id TEXT,
-    request_id TEXT,
-    raw_event_id TEXT,
-    source_path TEXT,
-    record_index INTEGER,
-    raw_payload TEXT,
-    processing_status TEXT DEFAULT 'pending',
+    source_record_key TEXT,
+    content_hash TEXT NOT NULL,
     occurred_at TIMESTAMP,
     collected_at TIMESTAMP NOT NULL,
-    payload TEXT NOT NULL,
-    source_ref TEXT NOT NULL,
-    event TEXT NOT NULL,
+    occurred_at_epoch REAL,
+    collected_at_epoch REAL,
+    processing_status TEXT DEFAULT 'pending',
+    processing_error TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -439,39 +434,13 @@ class SQLiteStore:
             self._ensure_column(
                 conn, "plugins", "execution_mode", "TEXT DEFAULT 'embedded_pipeline'"
             )
+            if self._raw_events_has_legacy_columns(conn):
+                self._rebuild_raw_events_release_schema(conn)
+            self._ensure_column(conn, "raw_events", "raw_record_type", "TEXT")
             self._ensure_column(conn, "raw_events", "source_record_key", "TEXT")
-            self._ensure_column(conn, "raw_events", "raw_event_key", "TEXT")
-            self._ensure_column(conn, "raw_events", "dataset_key", "TEXT")
-            self._ensure_column(conn, "raw_events", "collection", "TEXT")
-            self._ensure_column(conn, "raw_events", "page_name", "TEXT")
-            self._ensure_column(conn, "raw_events", "api_name", "TEXT")
-            self._ensure_column(conn, "raw_events", "source_file", "TEXT")
-            self._ensure_column(conn, "raw_events", "batch_id", "TEXT")
-            self._ensure_column(conn, "raw_events", "command_run_id", "TEXT")
-            self._ensure_column(conn, "raw_events", "request_id", "TEXT")
-            self._ensure_column(conn, "raw_events", "raw_event_id", "TEXT")
-            self._ensure_column(conn, "raw_events", "source_path", "TEXT")
-            self._ensure_column(conn, "raw_events", "record_index", "INTEGER")
-            self._ensure_column(conn, "raw_events", "raw_payload", "TEXT")
-            self._ensure_column(conn, "raw_events", "processing_status", "TEXT DEFAULT 'pending'")
-            self._ensure_column(conn, "raw_events", "occurred_at_epoch", "REAL")
-            self._ensure_column(conn, "raw_events", "collected_at_epoch", "REAL")
-            if self._has_unique_index_on_columns(conn, "raw_events", ["idempotency_key"]):
-                self._rebuild_raw_events_without_idempotency_unique(conn)
+            self._ensure_column(conn, "raw_events", "processing_error", "TEXT")
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_raw_events_dataset_key ON raw_events(dataset_key)"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_raw_events_collection ON raw_events(collection)"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_raw_events_page_name ON raw_events(page_name)"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_raw_events_api_name ON raw_events(api_name)"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_raw_events_source_system ON raw_events(source_system)"
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_raw_events_source_record_id ON raw_events(source_record_id)"
@@ -500,6 +469,10 @@ class SQLiteStore:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_collection_commands_batch ON collection_commands(batch_id)"
             )
+            self._ensure_column(conn, "collection_commands", "error_count", "INTEGER DEFAULT 0")
+            self._ensure_column(conn, "collection_commands", "processing_policy", "TEXT")
+            self._ensure_column(conn, "collection_commands", "result_summary", "TEXT")
+            self._ensure_column(conn, "collection_commands", "error", "TEXT")
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_collection_requests_batch_command ON collection_requests(batch_id, command_run_id)"
             )
@@ -639,34 +612,39 @@ class SQLiteStore:
                 return True
         return False
 
-    def _rebuild_raw_events_without_idempotency_unique(self, conn: sqlite3.Connection) -> None:
-        """Remove the old idempotency_key unique constraint while preserving rows."""
+    def _raw_events_has_legacy_columns(self, conn: sqlite3.Connection) -> bool:
+        columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(raw_events)").fetchall()
+        }
+        return bool({"event_id", "idempotency_key", "payload", "source_ref", "event"} & columns)
+
+    def _rebuild_raw_events_release_schema(self, conn: sqlite3.Connection) -> None:
+        """Migrate old SourceEvent-shaped raw_events rows into the MVP raw layer."""
         conn.execute("ALTER TABLE raw_events RENAME TO raw_events_legacy")
         conn.execute(
             """
             CREATE TABLE raw_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                event_id TEXT NOT NULL,
-                idempotency_key TEXT NOT NULL,
-                source_record_key TEXT,
-                raw_event_key TEXT,
-                source_system TEXT NOT NULL,
-                source_event_type TEXT NOT NULL,
-                event_granularity TEXT NOT NULL,
+                raw_event_key TEXT NOT NULL UNIQUE,
+                raw_event_id TEXT UNIQUE,
+                batch_id TEXT NOT NULL,
+                command_run_id TEXT NOT NULL,
+                request_id TEXT NOT NULL,
+                dataset_key TEXT NOT NULL,
+                raw_record_type TEXT,
+                raw_record TEXT NOT NULL,
+                source_path TEXT,
                 source_record_id TEXT,
                 source_record_hash TEXT,
-                occurred_at_epoch REAL,
-                collected_at_epoch REAL,
-                dataset_key TEXT,
-                collection TEXT,
-                page_name TEXT,
-                api_name TEXT,
-                source_file TEXT,
+                source_record_key TEXT,
+                content_hash TEXT NOT NULL,
                 occurred_at TIMESTAMP,
                 collected_at TIMESTAMP NOT NULL,
-                payload TEXT NOT NULL,
-                source_ref TEXT NOT NULL,
-                event TEXT NOT NULL,
+                occurred_at_epoch REAL,
+                collected_at_epoch REAL,
+                processing_status TEXT DEFAULT 'pending',
+                processing_error TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
             """
@@ -674,21 +652,33 @@ class SQLiteStore:
         conn.execute(
             """
             INSERT INTO raw_events (
-                id, event_id, idempotency_key, source_record_key, raw_event_key,
-                source_system, source_event_type, event_granularity,
-                source_record_id, source_record_hash, occurred_at_epoch,
-                collected_at_epoch, dataset_key, collection, page_name, api_name,
-                source_file, occurred_at, collected_at, payload, source_ref,
-                event, created_at
+                id, raw_event_key, raw_event_id, batch_id, command_run_id,
+                request_id, dataset_key, raw_record_type, raw_record, source_path,
+                source_record_id, source_record_hash, source_record_key,
+                content_hash, occurred_at, collected_at, occurred_at_epoch,
+                collected_at_epoch, processing_status, created_at
             )
             SELECT
-                id, event_id, idempotency_key,
-                COALESCE(source_record_key, idempotency_key),
+                id,
                 COALESCE(raw_event_key, idempotency_key || ':' || COALESCE(source_record_hash, '')),
-                source_system, source_event_type, event_granularity,
-                source_record_id, source_record_hash, NULL, NULL, dataset_key,
-                collection, page_name, api_name, source_file, occurred_at,
-                collected_at, payload, source_ref, event, created_at
+                COALESCE(raw_event_id, event_id),
+                COALESCE(batch_id, 'legacy_batch'),
+                COALESCE(command_run_id, 'legacy_command'),
+                COALESCE(request_id, 'legacy_request_' || id),
+                COALESCE(dataset_key, 'unknown'),
+                NULL,
+                COALESCE(raw_payload, json_extract(payload, '$.raw'), payload, '{}'),
+                source_path,
+                source_record_id,
+                source_record_hash,
+                COALESCE(source_record_key, idempotency_key),
+                COALESCE(source_record_hash, raw_event_key, idempotency_key),
+                occurred_at,
+                collected_at,
+                occurred_at_epoch,
+                collected_at_epoch,
+                COALESCE(processing_status, 'pending'),
+                created_at
             FROM raw_events_legacy
             """
         )
@@ -1012,7 +1002,11 @@ class SQLiteStore:
         self, event: Dict[str, Any], dataset_key: Optional[str] = None
     ) -> tuple[str, Optional[int]]:
         """
-        Save a SourceEvent v1 payload.
+        Convert an internal legacy SourceEvent fixture into the MVP raw_events table.
+
+        This is not a public ingestion path. Release ingestion remains
+        POST /ingestion/v1/batch; tests and old helpers use this method only to
+        seed one-record raw_events rows.
 
         Returns:
             ("accepted", rowid) for new events
@@ -1029,10 +1023,34 @@ class SQLiteStore:
                 if event.get("source_system") == "dcp":
                     raise ValueError("DCP raw event requires explicit dataset_key")
                 dataset_key = self._fallback_dataset_key(event)
-            source_record_key = event["idempotency_key"]
+            payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+            raw_payload = payload.get("raw") if isinstance(payload.get("raw"), dict) else payload
+            source_record_key = event.get("idempotency_key") or event.get("event_id")
             raw_event_key = f"{event['idempotency_key']}:{event.get('source_record_hash') or ''}"
             occurred_at_epoch = self._timestamp_epoch(event.get("occurred_at"))
             collected_at_epoch = self._timestamp_epoch(event.get("collected_at"))
+            raw_event_id = event.get("event_id") or raw_event_key
+            batch_id = source_ref.get("batch_id") or "legacy_batch"
+            command_run_id = source_ref.get("command_run_id") or f"legacy_command_{dataset_key}"
+            request_id = source_ref.get("request_id") or f"legacy_request_{raw_event_id}"
+            source_path = source_ref.get("record_path")
+            if source_path in (None, "") and source_ref.get("record_index") is not None:
+                source_path = f"records[{source_ref.get('record_index')}]"
+            content_hash = event.get("source_record_hash") or hashlib.sha256(
+                json.dumps(raw_payload, ensure_ascii=False, sort_keys=True, default=str).encode(
+                    "utf-8"
+                )
+            ).hexdigest()
+            request_context = source_ref.get("context")
+            if not isinstance(request_context, dict):
+                request_context = {}
+            request_context = {
+                **request_context,
+                "collection": collection,
+                "page_name": page_name,
+                "api_name": api_name,
+                "source_file": source_file,
+            }
 
             cursor = conn.execute(
                 "SELECT id FROM raw_events WHERE raw_event_key = ?",
@@ -1042,41 +1060,123 @@ class SQLiteStore:
             if existing:
                 return "duplicated", existing["id"]
 
+            now = datetime.now()
+            conn.execute(
+                """
+                INSERT INTO collection_batches (
+                    batch_id, batch_key, source_system, plugin_id, downloader_name,
+                    trigger_type, status, command_count, request_count,
+                    raw_record_count, error_count, metadata_snapshot,
+                    config_snapshot, result_summary, started_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1, 1, 0, '{}', '{}', '{}', ?, ?)
+                ON CONFLICT(batch_id) DO UPDATE SET
+                    request_count = collection_batches.request_count + 1,
+                    raw_record_count = collection_batches.raw_record_count + 1,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    batch_id,
+                    f"{dataset_key}_legacy_seed",
+                    event.get("source_system", "dcp"),
+                    "dcp",
+                    "vibe-downloader-dcp",
+                    "manual",
+                    "succeeded",
+                    event.get("collected_at"),
+                    now,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO collection_commands (
+                    command_run_id, batch_id, command_key, command_type,
+                    source_system, plugin_id, downloader_name, dataset_keys,
+                    params, status, request_count, raw_record_count,
+                    success_request_count, failed_request_count, error_count,
+                    started_at, updated_at
+                )
+                VALUES (?, ?, ?, 'legacy_seed', ?, 'dcp', 'vibe-downloader-dcp', ?, '{}',
+                        'succeeded', 1, 1, 1, 0, 0, ?, ?)
+                ON CONFLICT(command_run_id) DO UPDATE SET
+                    request_count = collection_commands.request_count + 1,
+                    raw_record_count = collection_commands.raw_record_count + 1,
+                    success_request_count = collection_commands.success_request_count + 1,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    command_run_id,
+                    batch_id,
+                    f"{dataset_key}_legacy_seed",
+                    event.get("source_system", "dcp"),
+                    self._json_text([dataset_key], []),
+                    event.get("collected_at"),
+                    now,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO collection_requests (
+                    request_id, batch_id, command_run_id, dataset_key,
+                    request_key, request_kind, source_system, plugin_id,
+                    downloader_name, api_name, source_path, request_params,
+                    request_context, response_meta, status, raw_record_count,
+                    error_count, requested_at, completed_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, 'legacy_seed', ?, 'dcp',
+                        'vibe-downloader-dcp', ?, ?, '{}', ?, '{}',
+                        'succeeded', 1, 0, ?, ?, ?)
+                ON CONFLICT(request_id) DO UPDATE SET
+                    raw_record_count = collection_requests.raw_record_count + 1,
+                    request_context = excluded.request_context,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    request_id,
+                    batch_id,
+                    command_run_id,
+                    dataset_key,
+                    source_ref.get("request_key") or raw_event_key,
+                    event.get("source_system", "dcp"),
+                    api_name,
+                    source_file,
+                    self._json_text(request_context, {}),
+                    event.get("collected_at"),
+                    event.get("collected_at"),
+                    now,
+                ),
+            )
             cursor = conn.execute(
                 """
                 INSERT INTO raw_events (
-                    event_id, idempotency_key, source_record_key, raw_event_key,
-                    source_system, source_event_type,
-                    event_granularity, source_record_id, source_record_hash,
-                    occurred_at_epoch, collected_at_epoch,
-                    dataset_key, collection, page_name, api_name, source_file,
-                    occurred_at, collected_at, payload, source_ref, event, created_at
+                    raw_event_key, raw_event_id, batch_id, command_run_id, request_id,
+                    dataset_key, raw_record_type, raw_record, source_path,
+                    source_record_id, source_record_hash, source_record_key,
+                    content_hash, occurred_at, collected_at, occurred_at_epoch,
+                    collected_at_epoch, processing_status, created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    event["event_id"],
-                    event["idempotency_key"],
-                    source_record_key,
                     raw_event_key,
-                    event["source_system"],
-                    event["source_event_type"],
-                    event["event_granularity"],
+                    raw_event_id,
+                    batch_id,
+                    command_run_id,
+                    request_id,
+                    dataset_key,
+                    event.get("source_event_type"),
+                    json.dumps(raw_payload, ensure_ascii=False, default=str),
+                    source_path,
                     event.get("source_record_id"),
                     event.get("source_record_hash"),
-                    occurred_at_epoch,
-                    collected_at_epoch,
-                    dataset_key,
-                    collection,
-                    page_name,
-                    api_name,
-                    source_file,
+                    source_record_key,
+                    content_hash,
                     event.get("occurred_at"),
                     event["collected_at"],
-                    json.dumps(event["payload"], ensure_ascii=False, default=str),
-                    json.dumps(event["source_ref"], ensure_ascii=False, default=str),
-                    json.dumps(event, ensure_ascii=False, default=str),
-                    datetime.now(),
+                    occurred_at_epoch,
+                    collected_at_epoch,
+                    "pending",
+                    now,
                 ),
             )
             conn.commit()
@@ -1095,9 +1195,54 @@ class SQLiteStore:
 
     def _decode_raw_event_row(self, row: sqlite3.Row) -> Dict[str, Any]:
         result = dict(row)
-        result["payload"] = self._load_json_or_default(result.get("payload"), {})
-        result["source_ref"] = self._load_json_or_default(result.get("source_ref"), {})
-        result["event"] = self._load_json_or_default(result.get("event"), {})
+        raw_record = self._load_json_or_default(result.get("raw_record"), {})
+        request_params = self._load_json_or_default(result.get("request_params"), {})
+        request_context = self._load_json_or_default(result.get("request_context"), {})
+        response_summary = self._load_json_or_default(result.get("response_summary"), {})
+        business_context = {
+            key: value
+            for key, value in request_context.items()
+            if key not in {"collection", "page_name", "api_name", "source_file"}
+        }
+        source_ref = {
+            "batch_id": result.get("batch_id"),
+            "command_run_id": result.get("command_run_id"),
+            "request_id": result.get("request_id"),
+            "request_key": result.get("request_key"),
+            "collection": result.get("collection") or request_context.get("collection"),
+            "collection_key": result.get("collection_key"),
+            "page_name": result.get("page_name") or request_context.get("page_name"),
+            "api_name": result.get("api_name") or request_context.get("api_name"),
+            "source_file": result.get("source_file") or request_context.get("source_file"),
+            "record_path": result.get("source_path"),
+            "source_path": result.get("source_path"),
+            "context": business_context,
+        }
+        result["raw_record"] = raw_record
+        result["raw_payload"] = raw_record
+        result["payload"] = {"raw": raw_record}
+        result["source_ref"] = source_ref
+        result["event"] = {
+            "schema_version": "raw_event.v1",
+            "raw_event_id": result.get("raw_event_id"),
+            "raw_event_key": result.get("raw_event_key"),
+            "dataset_key": result.get("dataset_key"),
+            "raw_record": raw_record,
+        }
+        result["source_system"] = result.get("source_system") or result.get(
+            "batch_source_system"
+        )
+        result["plugin_id"] = result.get("plugin_id") or result.get("batch_plugin_id")
+        result["downloader_name"] = result.get("downloader_name") or result.get(
+            "batch_downloader_name"
+        )
+        result["request_params"] = request_params
+        result["request_context"] = request_context
+        result["response_summary"] = response_summary
+        result["collection"] = source_ref["collection"]
+        result["page_name"] = source_ref["page_name"]
+        result["api_name"] = source_ref["api_name"]
+        result["source_file"] = source_ref["source_file"]
         return result
 
     def get_raw_event_by_idempotency_key(
@@ -1112,8 +1257,13 @@ class SQLiteStore:
         conn = self._get_connection()
         try:
             cursor = conn.execute(
-                "SELECT * FROM raw_events WHERE idempotency_key = ?",
-                (idempotency_key,),
+                """
+                SELECT * FROM raw_events
+                WHERE source_record_key = ? OR raw_event_key LIKE ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (idempotency_key, f"{idempotency_key}:%"),
             )
             row = cursor.fetchone()
             if not row:
@@ -1201,14 +1351,41 @@ class SQLiteStore:
             params.extend([limit, offset])
             cursor = conn.execute(
                 f"""
-                SELECT * FROM raw_events
-                WHERE {' AND '.join(where)}
-                ORDER BY id ASC
+                SELECT
+                    r.*,
+                    b.source_system AS batch_source_system,
+                    b.plugin_id AS batch_plugin_id,
+                    b.downloader_name AS batch_downloader_name,
+                    c.command_key,
+                    c.command_type,
+                    req.request_key,
+                    req.api_name,
+                    req.source_path AS request_source_path,
+                    req.request_params,
+                    req.request_context,
+                    req.response_meta AS response_summary,
+                    COALESCE(req.source_path, r.source_path) AS source_file,
+                    req.source_path AS collection_key,
+                    COALESCE(req.api_name, r.raw_record_type) AS joined_api_name,
+                    req.dataset_key AS request_dataset_key,
+                    req.request_kind
+                FROM raw_events r
+                LEFT JOIN collection_requests req ON req.request_id = r.request_id
+                LEFT JOIN collection_commands c ON c.command_run_id = r.command_run_id
+                LEFT JOIN collection_batches b ON b.batch_id = r.batch_id
+                WHERE {' AND '.join('r.' + item if item.startswith('dataset_key') or item.startswith('id ') else item for item in where)}
+                ORDER BY r.id ASC
                 LIMIT ? OFFSET ?
                 """,
                 params,
             )
-            return [self._decode_raw_event_row(row) for row in cursor.fetchall()]
+            decoded = [self._decode_raw_event_row(row) for row in cursor.fetchall()]
+            for item in decoded:
+                if item.get("api_name") in (None, ""):
+                    item["api_name"] = item.get("joined_api_name")
+                if item.get("dataset_key") in (None, ""):
+                    item["dataset_key"] = item.get("request_dataset_key")
+            return decoded
         finally:
             conn.close()
 
@@ -1251,6 +1428,20 @@ class SQLiteStore:
                 for request in requests
                 if isinstance(request, dict)
             }
+            raw_metadata_by_request: dict[str, dict[str, Any]] = {}
+            for raw_event in raw_events:
+                request_id = raw_event.get("request_id")
+                if not request_id:
+                    continue
+                metadata = raw_metadata_by_request.setdefault(request_id, {})
+                for field in ("collection", "page_name", "api_name", "source_file"):
+                    if raw_event.get(field) not in (None, "") and field not in metadata:
+                        metadata[field] = raw_event.get(field)
+            for request_id, metadata in raw_metadata_by_request.items():
+                merged_context = dict(request_context_by_id.get(request_id) or {})
+                for key, value in metadata.items():
+                    merged_context.setdefault(key, value)
+                request_context_by_id[request_id] = merged_context
 
             conn.execute(
                 """
@@ -1318,10 +1509,11 @@ class SQLiteStore:
                         source_system, plugin_id, downloader_name, dataset_keys,
                         scope_selector, scope_snapshot, params, downloader_job_id,
                         status, request_count, raw_record_count,
-                        success_request_count, failed_request_count,
+                        success_request_count, failed_request_count, error_count,
+                        processing_policy, result_summary, error,
                         started_at, finished_at, updated_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(command_run_id) DO UPDATE SET
                         batch_id=excluded.batch_id,
                         command_key=excluded.command_key,
@@ -1333,12 +1525,16 @@ class SQLiteStore:
                         scope_selector=excluded.scope_selector,
                         scope_snapshot=excluded.scope_snapshot,
                         params=excluded.params,
-                        downloader_job_id=excluded.downloader_job_id,
+                        downloader_job_id=COALESCE(excluded.downloader_job_id, collection_commands.downloader_job_id),
                         status=excluded.status,
                         request_count=excluded.request_count,
                         raw_record_count=excluded.raw_record_count,
                         success_request_count=excluded.success_request_count,
                         failed_request_count=excluded.failed_request_count,
+                        error_count=excluded.error_count,
+                        processing_policy=excluded.processing_policy,
+                        result_summary=excluded.result_summary,
+                        error=excluded.error,
                         started_at=excluded.started_at,
                         finished_at=excluded.finished_at,
                         updated_at=excluded.updated_at
@@ -1361,6 +1557,10 @@ class SQLiteStore:
                         command.get("raw_record_count", 0),
                         command.get("success_request_count", 0),
                         command.get("failed_request_count", 0),
+                        command.get("error_count", 0),
+                        self._json_text(command.get("processing_policy"), None),
+                        self._json_text(command.get("result_summary"), {}),
+                        command.get("error"),
                         command.get("started_at"),
                         command.get("finished_at"),
                         datetime.now(),
@@ -1369,6 +1569,9 @@ class SQLiteStore:
                 stats["collection_commands_upserted"] += 1
 
             for request in requests:
+                request_context = dict(request.get("request_context") or {})
+                for key, value in raw_metadata_by_request.get(request["request_id"], {}).items():
+                    request_context.setdefault(key, value)
                 conn.execute(
                     """
                     INSERT INTO collection_requests (
@@ -1413,7 +1616,7 @@ class SQLiteStore:
                         request.get("api_name"),
                         request.get("source_path"),
                         self._json_text(request.get("request_params"), {}),
-                        self._json_text(request.get("request_context"), {}),
+                        self._json_text(request_context, {}),
                         self._json_text(request.get("response_meta"), {}),
                         request["status"],
                         request.get("raw_record_count", 0),
@@ -1443,67 +1646,44 @@ class SQLiteStore:
                 )
                 request_context = dict(request_context_by_id.get(raw_event["request_id"]) or {})
                 request_context.update(raw_event.get("request_context") or {})
-                source_ref = {
-                    "batch_id": raw_event["batch_id"],
-                    "command_run_id": raw_event["command_run_id"],
-                    "request_id": raw_event["request_id"],
-                    "source_path": raw_event.get("source_path"),
-                    "record_index": raw_event.get("record_index"),
-                    "collection": raw_event.get("collection"),
-                    "page_name": raw_event.get("page_name"),
-                    "api_name": raw_event.get("api_name"),
-                    "source_file": raw_event.get("source_file"),
-                }
-                if request_context:
-                    source_ref["context"] = request_context
-                event_doc = {
-                    "schema_version": "raw_event.v1",
-                    **raw_event,
-                }
+                if raw_event.get("source_file") and "source_file" not in request_context:
+                    request_context["source_file"] = raw_event.get("source_file")
+                content_hash = raw_event.get("content_hash") or hashlib.sha256(
+                    json.dumps(
+                        raw_payload, ensure_ascii=False, sort_keys=True, default=str
+                    ).encode("utf-8")
+                ).hexdigest()
                 conn.execute(
                     """
                     INSERT INTO raw_events (
-                        event_id, idempotency_key, source_record_key, raw_event_key,
-                        source_system, source_event_type, event_granularity,
-                        source_record_id, source_record_hash,
-                        occurred_at_epoch, collected_at_epoch,
-                        dataset_key, collection, page_name, api_name, source_file,
-                        batch_id, command_run_id, request_id, raw_event_id,
-                        source_path, record_index, raw_payload, processing_status,
-                        occurred_at, collected_at, payload, source_ref, event, created_at
+                        raw_event_key, raw_event_id, batch_id, command_run_id,
+                        request_id, dataset_key, raw_record_type, raw_record,
+                        source_path, source_record_id, source_record_hash,
+                        source_record_key, content_hash, occurred_at, collected_at,
+                        occurred_at_epoch, collected_at_epoch, processing_status,
+                        created_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
+                        raw_event_key,
                         raw_event_id,
-                        raw_event_key,
-                        source_record_key,
-                        raw_event_key,
-                        raw_event["source_system"],
-                        f"{raw_event['source_system']}.record",
-                        "record",
-                        raw_event.get("source_record_id"),
-                        source_record_hash,
-                        self._timestamp_epoch(raw_event.get("occurred_at")),
-                        self._timestamp_epoch(raw_event.get("collected_at")),
-                        raw_event["dataset_key"],
-                        raw_event.get("collection"),
-                        raw_event.get("page_name"),
-                        raw_event.get("api_name"),
-                        raw_event.get("source_file"),
                         raw_event["batch_id"],
                         raw_event["command_run_id"],
                         raw_event["request_id"],
-                        raw_event_id,
-                        raw_event.get("source_path"),
-                        raw_event.get("record_index"),
+                        raw_event["dataset_key"],
+                        raw_event.get("raw_record_type"),
                         self._json_text(raw_payload, {}),
-                        raw_event.get("processing_status", "pending"),
+                        raw_event.get("source_path"),
+                        raw_event.get("source_record_id"),
+                        source_record_hash,
+                        source_record_key,
+                        content_hash,
                         raw_event.get("occurred_at"),
                         raw_event["collected_at"],
-                        self._json_text({"raw": raw_payload}, {}),
-                        self._json_text(source_ref, {}),
-                        self._json_text(event_doc, {}),
+                        self._timestamp_epoch(raw_event.get("occurred_at")),
+                        self._timestamp_epoch(raw_event.get("collected_at")),
+                        raw_event.get("processing_status", "pending"),
                         datetime.now(),
                     ),
                 )
@@ -1601,6 +1781,408 @@ class SQLiteStore:
         try:
             cursor = conn.execute(f"SELECT COUNT(*) AS count FROM {table_name}")
             return int(cursor.fetchone()["count"])
+        finally:
+            conn.close()
+
+    # --- Command batch orchestration operations ---
+
+    def _decode_collection_batch(self, row: sqlite3.Row | None) -> Optional[Dict[str, Any]]:
+        if not row:
+            return None
+        batch = dict(row)
+        for field in ("metadata_snapshot", "config_snapshot", "result_summary"):
+            batch[field] = self._load_json_or_default(batch.get(field), {})
+        return batch
+
+    def _decode_collection_command(self, row: sqlite3.Row | None) -> Optional[Dict[str, Any]]:
+        if not row:
+            return None
+        command = dict(row)
+        command["dataset_keys"] = self._load_json_or_default(
+            command.get("dataset_keys"), []
+        )
+        for field, default in (
+            ("scope_selector", None),
+            ("scope_snapshot", None),
+            ("params", {}),
+            ("processing_policy", None),
+            ("result_summary", {}),
+        ):
+            command[field] = self._load_json_or_default(command.get(field), default)
+        return command
+
+    def create_collection_batch(self, **batch: Any) -> Dict[str, Any]:
+        now = datetime.now()
+        payload = {
+            "schema_version": "collection_batch.v1",
+            "batch_id": batch["batch_id"],
+            "batch_key": batch.get("batch_key"),
+            "source_system": batch.get("source_system", "dcp"),
+            "plugin_id": batch.get("plugin_id", "dcp"),
+            "downloader_name": batch.get("downloader_name", "vibe-downloader-dcp"),
+            "trigger_type": batch.get("trigger_type", "manual"),
+            "status": batch.get("status", "queued"),
+            "schedule_key": batch.get("schedule_key"),
+            "schedule_cron": batch.get("schedule_cron"),
+            "timezone": batch.get("timezone", "Asia/Shanghai"),
+            "command_count": batch.get("command_count", 0),
+            "request_count": batch.get("request_count", 0),
+            "raw_record_count": batch.get("raw_record_count", 0),
+            "error_count": batch.get("error_count", 0),
+            "metadata_snapshot": batch.get("metadata_snapshot") or {},
+            "config_snapshot": batch.get("config_snapshot") or {},
+            "result_summary": batch.get("result_summary") or {},
+            "error": batch.get("error"),
+            "started_at": batch.get("started_at") or now,
+            "finished_at": batch.get("finished_at"),
+        }
+        self.save_ingestion_batch({"batch": payload, "commands": [], "requests": [], "raw_events": []})
+        created = self.get_collection_batch(payload["batch_id"])
+        if created is None:
+            raise RuntimeError(f"failed to create collection batch: {payload['batch_id']}")
+        return created
+
+    def get_collection_batch(self, batch_id: str) -> Optional[Dict[str, Any]]:
+        conn = self._get_connection()
+        try:
+            row = conn.execute(
+                "SELECT * FROM collection_batches WHERE batch_id = ?",
+                (batch_id,),
+            ).fetchone()
+            return self._decode_collection_batch(row)
+        finally:
+            conn.close()
+
+    def create_collection_command(self, **command: Any) -> Dict[str, Any]:
+        conn = self._get_connection()
+        try:
+            now = datetime.now()
+            conn.execute(
+                """
+                INSERT INTO collection_commands (
+                    command_run_id, batch_id, command_key, command_type,
+                    source_system, plugin_id, downloader_name, dataset_keys,
+                    scope_selector, scope_snapshot, params, downloader_job_id,
+                    status, request_count, raw_record_count,
+                    success_request_count, failed_request_count, error_count,
+                    processing_policy, result_summary, error,
+                    started_at, finished_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(command_run_id) DO UPDATE SET
+                    batch_id=excluded.batch_id,
+                    command_key=excluded.command_key,
+                    command_type=excluded.command_type,
+                    source_system=excluded.source_system,
+                    plugin_id=excluded.plugin_id,
+                    downloader_name=excluded.downloader_name,
+                    dataset_keys=excluded.dataset_keys,
+                    scope_selector=excluded.scope_selector,
+                    scope_snapshot=excluded.scope_snapshot,
+                    params=excluded.params,
+                    downloader_job_id=excluded.downloader_job_id,
+                    status=excluded.status,
+                    processing_policy=excluded.processing_policy,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    command["command_run_id"],
+                    command["batch_id"],
+                    command["command_key"],
+                    command.get("command_type", "refresh"),
+                    command.get("source_system", "dcp"),
+                    command.get("plugin_id", "dcp"),
+                    command.get("downloader_name", "vibe-downloader-dcp"),
+                    self._json_text(command.get("dataset_keys") or [], []),
+                    self._json_text(command.get("scope_selector"), None),
+                    self._json_text(command.get("scope_snapshot"), None),
+                    self._json_text(command.get("params"), {}),
+                    command.get("downloader_job_id"),
+                    command.get("status", "queued"),
+                    command.get("request_count", 0),
+                    command.get("raw_record_count", 0),
+                    command.get("success_request_count", 0),
+                    command.get("failed_request_count", 0),
+                    command.get("error_count", 0),
+                    self._json_text(command.get("processing_policy"), None),
+                    self._json_text(command.get("result_summary"), {}),
+                    command.get("error"),
+                    command.get("started_at"),
+                    command.get("finished_at"),
+                    now,
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE collection_batches
+                SET command_count = (
+                    SELECT COUNT(*) FROM collection_commands
+                    WHERE batch_id = ?
+                ),
+                    updated_at = ?
+                WHERE batch_id = ?
+                """,
+                (command["batch_id"], now, command["batch_id"]),
+            )
+            conn.commit()
+            created = self.get_collection_command(command["command_run_id"])
+            if created is None:
+                raise RuntimeError(
+                    f"failed to create collection command: {command['command_run_id']}"
+                )
+            return created
+        finally:
+            conn.close()
+
+    def get_collection_command(self, command_run_id: str) -> Optional[Dict[str, Any]]:
+        conn = self._get_connection()
+        try:
+            row = conn.execute(
+                "SELECT * FROM collection_commands WHERE command_run_id = ?",
+                (command_run_id,),
+            ).fetchone()
+            return self._decode_collection_command(row)
+        finally:
+            conn.close()
+
+    def list_pending_commands(self, batch_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        conn = self._get_connection()
+        try:
+            where = ["status = 'queued'"]
+            params: list[Any] = []
+            if batch_id:
+                where.append("batch_id = ?")
+                params.append(batch_id)
+            rows = conn.execute(
+                f"""
+                SELECT * FROM collection_commands
+                WHERE {' AND '.join(where)}
+                ORDER BY id ASC
+                """,
+                params,
+            ).fetchall()
+            return [
+                command
+                for row in rows
+                if (command := self._decode_collection_command(row)) is not None
+            ]
+        finally:
+            conn.close()
+
+    def mark_command_running(
+        self,
+        command_run_id: str,
+        *,
+        downloader_job_id: Optional[str] = None,
+        scope_snapshot: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        conn = self._get_connection()
+        try:
+            conn.execute(
+                """
+                UPDATE collection_commands
+                SET status = 'running',
+                    downloader_job_id = COALESCE(?, downloader_job_id),
+                    scope_snapshot = COALESCE(?, scope_snapshot),
+                    started_at = COALESCE(started_at, ?),
+                    updated_at = ?
+                WHERE command_run_id = ?
+                """,
+                (
+                    downloader_job_id,
+                    self._json_text(scope_snapshot, None) if scope_snapshot is not None else None,
+                    datetime.now(),
+                    datetime.now(),
+                    command_run_id,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def mark_command_succeeded(
+        self,
+        command_run_id: str,
+        *,
+        request_count: int = 0,
+        raw_record_count: int = 0,
+        success_request_count: int = 0,
+        failed_request_count: int = 0,
+        error_count: int = 0,
+        result_summary: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        conn = self._get_connection()
+        try:
+            conn.execute(
+                """
+                UPDATE collection_commands
+                SET status = 'succeeded',
+                    request_count = ?,
+                    raw_record_count = ?,
+                    success_request_count = ?,
+                    failed_request_count = ?,
+                    error_count = ?,
+                    result_summary = ?,
+                    finished_at = ?,
+                    updated_at = ?
+                WHERE command_run_id = ?
+                """,
+                (
+                    request_count,
+                    raw_record_count,
+                    success_request_count,
+                    failed_request_count,
+                    error_count,
+                    self._json_text(result_summary, {}),
+                    datetime.now(),
+                    datetime.now(),
+                    command_run_id,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def mark_command_failed(
+        self,
+        command_run_id: str,
+        *,
+        error: str,
+        error_count: int = 1,
+        result_summary: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        conn = self._get_connection()
+        try:
+            conn.execute(
+                """
+                UPDATE collection_commands
+                SET status = 'failed',
+                    error = ?,
+                    error_count = ?,
+                    result_summary = ?,
+                    finished_at = ?,
+                    updated_at = ?
+                WHERE command_run_id = ?
+                """,
+                (
+                    error,
+                    error_count,
+                    self._json_text(result_summary, {}),
+                    datetime.now(),
+                    datetime.now(),
+                    command_run_id,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def record_collection_error(self, **error: Any) -> Dict[str, Any]:
+        conn = self._get_connection()
+        try:
+            error_id = error.get("error_id") or hashlib.sha256(
+                json.dumps(error, ensure_ascii=False, sort_keys=True, default=str).encode(
+                    "utf-8"
+                )
+            ).hexdigest()
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO collection_errors (
+                    error_id, batch_id, command_run_id, request_id, raw_event_id,
+                    source_system, plugin_id, downloader_name, dataset_key,
+                    error_stage, error_type, message, details, retryable,
+                    occurred_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    error_id,
+                    error.get("batch_id"),
+                    error.get("command_run_id"),
+                    error.get("request_id"),
+                    error.get("raw_event_id"),
+                    error.get("source_system", "dcp"),
+                    error.get("plugin_id"),
+                    error.get("downloader_name"),
+                    error.get("dataset_key"),
+                    error.get("error_stage") or error.get("stage") or "collection",
+                    error.get("error_type", "Error"),
+                    error.get("message", ""),
+                    self._json_text(error.get("details"), {}),
+                    1 if error.get("retryable") else 0,
+                    error.get("occurred_at") or datetime.now(),
+                ),
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT * FROM collection_errors WHERE error_id = ?",
+                (error_id,),
+            ).fetchone()
+            result = dict(row)
+            result["details"] = self._load_json_or_default(result.get("details"), {})
+            return result
+        finally:
+            conn.close()
+
+    def upsert_collection_checkpoint(self, **checkpoint: Any) -> Dict[str, Any]:
+        conn = self._get_connection()
+        try:
+            conn.execute(
+                """
+                INSERT INTO collection_checkpoints (
+                    checkpoint_key, source_system, plugin_id, dataset_key,
+                    checkpoint_type, checkpoint_value, batch_id, command_run_id,
+                    request_id, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(checkpoint_key) DO UPDATE SET
+                    source_system=excluded.source_system,
+                    plugin_id=excluded.plugin_id,
+                    dataset_key=excluded.dataset_key,
+                    checkpoint_type=excluded.checkpoint_type,
+                    checkpoint_value=excluded.checkpoint_value,
+                    batch_id=excluded.batch_id,
+                    command_run_id=excluded.command_run_id,
+                    request_id=excluded.request_id,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    checkpoint["checkpoint_key"],
+                    checkpoint.get("source_system", "dcp"),
+                    checkpoint.get("plugin_id", "dcp"),
+                    checkpoint["dataset_key"],
+                    checkpoint["checkpoint_type"],
+                    self._json_text(checkpoint.get("checkpoint_value"), {}),
+                    checkpoint.get("batch_id"),
+                    checkpoint.get("command_run_id"),
+                    checkpoint.get("request_id"),
+                    datetime.now(),
+                ),
+            )
+            conn.commit()
+            result = self.get_collection_checkpoint(checkpoint["checkpoint_key"])
+            if result is None:
+                raise RuntimeError(
+                    f"failed to upsert checkpoint: {checkpoint['checkpoint_key']}"
+                )
+            return result
+        finally:
+            conn.close()
+
+    def get_collection_checkpoint(self, checkpoint_key: str) -> Optional[Dict[str, Any]]:
+        conn = self._get_connection()
+        try:
+            row = conn.execute(
+                "SELECT * FROM collection_checkpoints WHERE checkpoint_key = ?",
+                (checkpoint_key,),
+            ).fetchone()
+            if not row:
+                return None
+            checkpoint = dict(row)
+            checkpoint["checkpoint_value"] = self._load_json_or_default(
+                checkpoint.get("checkpoint_value"), {}
+            )
+            return checkpoint
         finally:
             conn.close()
 

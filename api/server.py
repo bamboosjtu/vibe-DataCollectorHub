@@ -192,6 +192,7 @@ class CollectionCommandV1(BaseModel):
     plugin_id: str
     downloader_name: str
     dataset_keys: List[str]
+    depends_on_command: Optional[str] = None
     scope_selector: Optional[Dict[str, Any]] = None
     scope_snapshot: Optional[Dict[str, Any]] = None
     params: Dict[str, Any] = Field(default_factory=dict)
@@ -201,6 +202,10 @@ class CollectionCommandV1(BaseModel):
     raw_record_count: int = 0
     success_request_count: int = 0
     failed_request_count: int = 0
+    error_count: int = 0
+    processing_policy: Optional[Dict[str, Any]] = None
+    result_summary: Dict[str, Any] = Field(default_factory=dict)
+    error: Optional[str] = None
     started_at: Optional[str] = None
     finished_at: Optional[str] = None
 
