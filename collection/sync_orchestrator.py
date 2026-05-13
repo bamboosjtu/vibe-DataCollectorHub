@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Any
 
 from collection.command_service import CommandBatchService
-from collection.downloader_client import DownloaderClient
+from collection.downloader_client import DownloaderClient, create_downloader_client
 from collection.scope_selector import CanonicalScopeSelector
 from processing.normalizer_runner import NormalizerRunner
 from storage.sqlite_store import SQLiteStore
@@ -24,6 +24,20 @@ class SyncOrchestrator:
         self.command_service = CommandBatchService(store)
         self.downloader_client = downloader_client
         self.scope_selector = scope_selector or CanonicalScopeSelector(store)
+
+    @classmethod
+    def from_config(
+        cls,
+        *,
+        store: SQLiteStore,
+        config: dict[str, Any],
+        scope_selector: CanonicalScopeSelector | None = None,
+    ) -> "SyncOrchestrator":
+        return cls(
+            store=store,
+            downloader_client=create_downloader_client(config),
+            scope_selector=scope_selector,
+        )
 
     def create_batch_with_commands(
         self,
@@ -91,8 +105,20 @@ class SyncOrchestrator:
                 downloader_job_id=job_id,
                 scope_snapshot={"items": scope_items},
             )
+            wait_for_terminal_status = getattr(
+                self.downloader_client,
+                "wait_for_terminal_status",
+                None,
+            )
+            if callable(wait_for_terminal_status):
+                status_payload = wait_for_terminal_status(job_id)
+                if status_payload.get("status") in {"failed", "cancelled"}:
+                    raise RuntimeError(
+                        status_payload.get("error")
+                        or f"downloader sync {status_payload.get('status')}"
+                    )
             sync_result = self.downloader_client.get_result(job_id)
-            if sync_result.get("status") == "failed":
+            if sync_result.get("status") in {"failed", "cancelled"}:
                 raise RuntimeError(sync_result.get("error") or "downloader sync failed")
 
             ingestion_batch = sync_result.get("ingestion_batch")

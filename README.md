@@ -198,6 +198,24 @@ uv run python tests/scripts/test_websocket_verification.py
 |------|------|------|
 | `/ingestion/v1/batch` | POST | 批量接入 collection batch / command / request / raw_event |
 
+### Command Orchestration
+
+DataHub command batch orchestration can use either a fake downloader client for
+unit tests or an HTTP downloader client for the real service contract. The HTTP
+client calls:
+
+```text
+POST /sync
+GET  /sync/jobs/{job_id}
+GET  /sync/jobs/{job_id}/result
+```
+
+The downloader returns and exposes `downloader_job_id` / `job_id`; DataHub stores
+that value on `collection_commands.downloader_job_id`, polls the job to a
+terminal status, then reads the result and updates command status. Downloader
+data writes are only accepted through `POST /ingestion/v1/batch`; downloader
+services must not write DataHub SQLite directly.
+
 ### 归一化处理
 
 | 端点 | 方法 | 说明 |
