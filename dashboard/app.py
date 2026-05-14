@@ -26,18 +26,18 @@ import streamlit as st
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.plugin_config_validator import validate_plugin_runtime_config
-from health.dataset_health import get_context_coverage, get_daily_meeting_date_health, get_dataset_health
+from health.dataset_health import (
+    get_context_coverage,
+    get_daily_meeting_date_health,
+    get_dataset_health,
+)
 from health.domain_health import get_domain_health
 from health.job_health import get_job_health
 from health.summary import get_health_summary
 from storage.sqlite_store import SQLiteStore
 
 # Page config
-st.set_page_config(
-    page_title="Data Collector Hub v1.0",
-    page_icon="📊",
-    layout="wide"
-)
+st.set_page_config(page_title="Data Collector Hub v1.0", page_icon="📊", layout="wide")
 
 # Database path
 DB_PATH = Path(__file__).parent.parent / "data" / "collector.db"
@@ -60,12 +60,16 @@ def get_plugin_list():
         plugins = []
         for row in cursor.fetchall():
             plugin = dict(row)
-            plugin['config'] = json.loads(plugin['config']) if plugin['config'] else {}
-            plugin['dependencies'] = json.loads(plugin['dependencies']) if plugin['dependencies'] else []
+            plugin["config"] = json.loads(plugin["config"]) if plugin["config"] else {}
+            plugin["dependencies"] = (
+                json.loads(plugin["dependencies"]) if plugin["dependencies"] else []
+            )
 
             # Get tags
-            tag_cursor = conn.execute("SELECT tag FROM plugin_tags WHERE plugin_id = ?", (plugin['id'],))
-            plugin['tags'] = [r['tag'] for r in tag_cursor.fetchall()]
+            tag_cursor = conn.execute(
+                "SELECT tag FROM plugin_tags WHERE plugin_id = ?", (plugin["id"],)
+            )
+            plugin["tags"] = [r["tag"] for r in tag_cursor.fetchall()]
             plugins.append(plugin)
         return plugins
     finally:
@@ -90,7 +94,9 @@ def _api_json(method: str, path: str, payload: dict | None = None) -> tuple[int,
     headers = {"Content-Type": "application/json"}
     if payload is not None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    req = request.Request(f"{base_url}{path}", data=body, method=method, headers=headers)
+    req = request.Request(
+        f"{base_url}{path}", data=body, method=method, headers=headers
+    )
     try:
         with request.urlopen(req, timeout=30) as resp:
             text = resp.read().decode("utf-8")
@@ -112,19 +118,19 @@ def get_counts():
     try:
         result = {}
         cursor = conn.execute("SELECT COUNT(*) as count FROM plugins")
-        result['plugins'] = cursor.fetchone()['count']
+        result["plugins"] = cursor.fetchone()["count"]
 
         cursor = conn.execute("SELECT COUNT(*) as count FROM raw_data")
-        result['raw_data'] = cursor.fetchone()['count']
+        result["raw_data"] = cursor.fetchone()["count"]
 
         cursor = conn.execute("SELECT COUNT(*) as count FROM raw_events")
-        result['raw_events'] = cursor.fetchone()['count']
+        result["raw_events"] = cursor.fetchone()["count"]
 
         cursor = conn.execute("SELECT COUNT(*) as count FROM normalized_data")
-        result['normalized_data'] = cursor.fetchone()['count']
+        result["normalized_data"] = cursor.fetchone()["count"]
 
         cursor = conn.execute("SELECT COUNT(*) as count FROM logs")
-        result['logs'] = cursor.fetchone()['count']
+        result["logs"] = cursor.fetchone()["count"]
 
         return result
     finally:
@@ -136,12 +142,14 @@ def get_task_stats():
     """Get task statistics (cached)"""
     conn = get_connection()
     try:
-        cursor = conn.execute("""
+        cursor = conn.execute(
+            """
             SELECT plugin_id, run_count, fail_count, last_run, consecutive_fails
             FROM task_stats
             ORDER BY last_run DESC
             LIMIT 10
-        """)
+        """
+        )
         return [dict(row) for row in cursor.fetchall()]
     finally:
         conn.close()
@@ -153,53 +161,128 @@ def get_raw_data(plugin_filter, limit):
     conn = get_connection()
     try:
         if plugin_filter == "All":
-            cursor = conn.execute("""
+            cursor = conn.execute(
+                """
                 SELECT id, plugin_id, source, data, created_at
                 FROM raw_data
                 ORDER BY id DESC
                 LIMIT ?
-            """, (limit,))
+            """,
+                (limit,),
+            )
         else:
-            cursor = conn.execute("""
+            cursor = conn.execute(
+                """
                 SELECT id, plugin_id, source, data, created_at
                 FROM raw_data
                 WHERE plugin_id = ?
                 ORDER BY id DESC
                 LIMIT ?
-            """, (plugin_filter, limit))
+            """,
+                (plugin_filter, limit),
+            )
         return [dict(row) for row in cursor.fetchall()]
     finally:
         conn.close()
+
+
+def _safe_json_loads(value, fallback=None):
+    """Safely parse a JSON string from SQLite."""
+    if value is None:
+        return fallback if fallback is not None else {}
+
+    if isinstance(value, (dict, list)):
+        return value
+
+    if not isinstance(value, str):
+        return fallback if fallback is not None else {"value": value}
+
+    if not value.strip():
+        return fallback if fallback is not None else {}
+
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return fallback if fallback is not None else {"_raw": value}
 
 
 @st.cache_data(ttl=5)
 def get_raw_events(dataset_filter, limit):
-    """Get MVP raw_event rows (cached)."""
+    """Get MVP raw_event rows with request / command / batch context."""
     conn = get_connection()
     try:
-        if dataset_filter == "All":
-            cursor = conn.execute("""
-                SELECT id, dataset_key, collection, page_name, api_name, source_file,
-                       occurred_at, collected_at, source_system, source_record_id,
-                       source_record_hash, source_record_key, raw_event_key
-                FROM raw_events
-                ORDER BY id DESC
-                LIMIT ?
-            """, (limit,))
-        else:
-            cursor = conn.execute("""
-                SELECT id, dataset_key, collection, page_name, api_name, source_file,
-                       occurred_at, collected_at, source_system, source_record_id,
-                       source_record_hash, source_record_key, raw_event_key
-                FROM raw_events
-                WHERE dataset_key = ?
-                ORDER BY id DESC
-                LIMIT ?
-            """, (dataset_filter, limit))
+        where_clause = ""
+        params: list[object] = []
+
+        if dataset_filter != "All":
+            where_clause = "WHERE e.dataset_key = ?"
+            params.append(dataset_filter)
+
+        params.append(limit)
+
+        cursor = conn.execute(
+            f"""
+            SELECT
+                e.id,
+                e.raw_event_key,
+                e.raw_event_id,
+                e.dataset_key,
+                e.raw_record_type,
+                e.raw_record,
+                e.source_path,
+                e.source_record_id,
+                e.source_record_hash,
+                e.source_record_key,
+                e.content_hash,
+                e.occurred_at,
+                e.collected_at,
+                e.processing_status,
+                e.processing_error,
+                e.batch_id,
+                e.command_run_id,
+                e.request_id,
+                e.created_at,
+
+                r.request_key,
+                r.request_kind,
+                r.api_name,
+                r.source_path AS request_source_path,
+                r.request_params,
+                r.request_context,
+                r.response_meta,
+                r.status AS request_status,
+                r.raw_record_count AS request_raw_record_count,
+                r.error_count AS request_error_count,
+                r.requested_at,
+                r.completed_at,
+
+                c.command_key,
+                c.command_type,
+                c.profile,
+                c.status AS command_status,
+
+                b.batch_key,
+                b.source_system,
+                b.plugin_id,
+                b.downloader_name,
+                b.status AS batch_status
+
+            FROM raw_events e
+            LEFT JOIN collection_requests r
+              ON e.request_id = r.request_id
+            LEFT JOIN collection_commands c
+              ON e.command_run_id = c.command_run_id
+            LEFT JOIN collection_batches b
+              ON e.batch_id = b.batch_id
+            {where_clause}
+            ORDER BY e.id DESC
+            LIMIT ?
+            """,
+            params,
+        )
         return [dict(row) for row in cursor.fetchall()]
     finally:
         conn.close()
-
 
 @st.cache_data(ttl=5)
 def get_raw_event_dataset_keys():
@@ -278,11 +361,13 @@ def get_statistics():
     """Get all task statistics (cached)"""
     conn = get_connection()
     try:
-        cursor = conn.execute("""
+        cursor = conn.execute(
+            """
             SELECT plugin_id, run_count, fail_count, last_run, last_fail, consecutive_fails
             FROM task_stats
             ORDER BY last_run DESC
-        """)
+        """
+        )
         return [dict(row) for row in cursor.fetchall()]
     finally:
         conn.close()
@@ -296,7 +381,7 @@ def get_event_types():
         cursor = conn.execute(
             "SELECT DISTINCT event_type FROM normalized_data WHERE event_type IS NOT NULL"
         )
-        return [row['event_type'] for row in cursor.fetchall()]
+        return [row["event_type"] for row in cursor.fetchall()]
     finally:
         conn.close()
 
@@ -330,7 +415,9 @@ def get_collection_job_summary(plugin_id: str):
 
 
 @st.cache_data(ttl=5)
-def get_collection_jobs(plugin_id: str, status_filter: str, profile_filter: str, limit: int):
+def get_collection_jobs(
+    plugin_id: str, status_filter: str, profile_filter: str, limit: int
+):
     jobs = SQLiteStore(DB_PATH).list_external_collection_jobs(
         plugin_id=None if plugin_id == "All" else plugin_id,
         status=None if status_filter == "All" else status_filter,
@@ -431,7 +518,7 @@ page = st.sidebar.radio(
         "🩺 Data Health",
         "📈 Statistics",
         "📝 Logs",
-    ]
+    ],
 )
 
 # Home Page
@@ -445,19 +532,19 @@ if page == "🏠 Home":
     col1, col2, col3, col4, col5 = st.columns(5)
 
     with col1:
-        st.metric("Plugins", counts.get('plugins', 0))
+        st.metric("Plugins", counts.get("plugins", 0))
 
     with col2:
-        st.metric("Raw Data", counts.get('raw_data', 0))
+        st.metric("Raw Data", counts.get("raw_data", 0))
 
     with col3:
-        st.metric("Raw Events", counts.get('raw_events', 0))
+        st.metric("Raw Events", counts.get("raw_events", 0))
 
     with col4:
-        st.metric("Normalized Data", counts.get('normalized_data', 0))
+        st.metric("Normalized Data", counts.get("normalized_data", 0))
 
     with col5:
-        st.metric("Logs", counts.get('logs', 0))
+        st.metric("Logs", counts.get("logs", 0))
 
     st.markdown("---")
 
@@ -467,16 +554,18 @@ if page == "🏠 Home":
     stats = get_task_stats()
 
     if stats:
-        df = pd.DataFrame([
-            {
-                "Plugin": row["plugin_id"],
-                "Run Count": row["run_count"],
-                "Fail Count": row["fail_count"],
-                "Last Run": row["last_run"],
-                "Consecutive Fails": row["consecutive_fails"]
-            }
-            for row in stats
-        ])
+        df = pd.DataFrame(
+            [
+                {
+                    "Plugin": row["plugin_id"],
+                    "Run Count": row["run_count"],
+                    "Fail Count": row["fail_count"],
+                    "Last Run": row["last_run"],
+                    "Consecutive Fails": row["consecutive_fails"],
+                }
+                for row in stats
+            ]
+        )
         st.dataframe(df, use_container_width=True)
     else:
         st.info("No task statistics available yet.")
@@ -507,17 +596,17 @@ elif page == "🔌 Plugins":
                     st.write(f"**Created:** {plugin['created_at']}")
                     st.write(f"**Updated:** {plugin['updated_at']}")
 
-                if plugin.get('config_schema'):
+                if plugin.get("config_schema"):
                     st.write("**Config Schema:**")
-                    st.json(plugin['config_schema'])
+                    st.json(plugin["config_schema"])
 
-                runtime_config = get_plugin_runtime_config(plugin['id'])
+                runtime_config = get_plugin_runtime_config(plugin["id"])
                 st.write("**Runtime Config:**")
                 config_text = st.text_area(
                     "Runtime Config JSON",
                     value=json.dumps(runtime_config, ensure_ascii=False, indent=2),
                     height=260,
-                    key=f"runtime_config_{plugin['id']}"
+                    key=f"runtime_config_{plugin['id']}",
                 )
                 if st.button("Save Config", key=f"save_config_{plugin['id']}"):
                     try:
@@ -525,13 +614,15 @@ elif page == "🔌 Plugins":
                         if not isinstance(parsed_config, dict):
                             st.error("Runtime config must be a JSON object.")
                         else:
-                            errors = validate_plugin_runtime_config(plugin['id'], parsed_config)
+                            errors = validate_plugin_runtime_config(
+                                plugin["id"], parsed_config
+                            )
                             if errors:
                                 st.error("Runtime config validation failed:")
                                 for error in errors:
                                     st.error(error)
                             else:
-                                save_plugin_runtime_config(plugin['id'], parsed_config)
+                                save_plugin_runtime_config(plugin["id"], parsed_config)
                                 st.cache_data.clear()
                                 st.success("Runtime config saved.")
                                 st.rerun()
@@ -541,7 +632,9 @@ elif page == "🔌 Plugins":
 # Raw Data Page
 elif page == "📄 Raw Data":
     st.title("📄 Raw Data")
-    st.info("raw_data stores embedded pipeline collector output. raw_events stores one original business record per MVP ingestion batch row.")
+    st.info(
+        "raw_data stores embedded pipeline collector output. raw_events stores one original business record per MVP ingestion batch row."
+    )
     st.markdown("---")
 
     # Filter by plugin
@@ -574,7 +667,11 @@ elif page == "📄 Raw Data":
                     # Try to extract title from data
                     title = data.get("title", "")
                     if title:
-                        st.write(f"**Title:** {title[:50]}..." if len(title) > 50 else f"**Title:** {title}")
+                        st.write(
+                            f"**Title:** {title[:50]}..."
+                            if len(title) > 50
+                            else f"**Title:** {title}"
+                        )
 
                 with col3:
                     st.write(f"**Created:** {row['created_at']}")
@@ -599,8 +696,108 @@ elif page == "🧾 Raw Events":
         st.info("No raw events available.")
     else:
         st.write(f"Showing {len(rows)} raw events:")
-        df = pd.DataFrame(rows)
-        st.dataframe(df, use_container_width=True)
+
+        table_rows = []
+        for row in rows:
+            table_rows.append(
+                {
+                    "id": row.get("id"),
+                    "dataset_key": row.get("dataset_key"),
+                    "raw_record_type": row.get("raw_record_type"),
+                    "request_key": row.get("request_key"),
+                    "request_kind": row.get("request_kind"),
+                    "api_name": row.get("api_name"),
+                    "request_source_path": row.get("request_source_path"),
+                    "command_key": row.get("command_key"),
+                    "command_type": row.get("command_type"),
+                    "profile": row.get("profile"),
+                    "source_path": row.get("source_path"),
+                    "source_record_id": row.get("source_record_id"),
+                    "source_record_hash": row.get("source_record_hash"),
+                    "source_record_key": row.get("source_record_key"),
+                    "content_hash": row.get("content_hash"),
+                    "processing_status": row.get("processing_status"),
+                    "collected_at": row.get("collected_at"),
+                    "batch_id": row.get("batch_id"),
+                    "command_run_id": row.get("command_run_id"),
+                    "request_id": row.get("request_id"),
+                    "raw_event_key": row.get("raw_event_key"),
+                }
+            )
+
+        st.dataframe(pd.DataFrame(table_rows), use_container_width=True)
+
+        st.subheader("Raw Event Details")
+
+        for row in rows:
+            label = (
+                f"#{row.get('id')} | "
+                f"{row.get('dataset_key') or '-'} | "
+                f"{row.get('request_key') or row.get('request_id') or '-'} | "
+                f"{row.get('source_record_id') or row.get('raw_event_key') or '-'}"
+            )
+
+            with st.expander(label):
+                meta_col, request_col = st.columns(2)
+
+                with meta_col:
+                    st.write("**Raw Event Metadata**")
+                    st.json(
+                        {
+                            "id": row.get("id"),
+                            "raw_event_key": row.get("raw_event_key"),
+                            "raw_event_id": row.get("raw_event_id"),
+                            "dataset_key": row.get("dataset_key"),
+                            "raw_record_type": row.get("raw_record_type"),
+                            "source_path": row.get("source_path"),
+                            "source_record_id": row.get("source_record_id"),
+                            "source_record_hash": row.get("source_record_hash"),
+                            "source_record_key": row.get("source_record_key"),
+                            "content_hash": row.get("content_hash"),
+                            "occurred_at": row.get("occurred_at"),
+                            "collected_at": row.get("collected_at"),
+                            "processing_status": row.get("processing_status"),
+                            "processing_error": row.get("processing_error"),
+                        }
+                    )
+
+                with request_col:
+                    st.write("**Request / Command Context**")
+                    st.json(
+                        {
+                            "batch_id": row.get("batch_id"),
+                            "batch_key": row.get("batch_key"),
+                            "batch_status": row.get("batch_status"),
+                            "source_system": row.get("source_system"),
+                            "plugin_id": row.get("plugin_id"),
+                            "downloader_name": row.get("downloader_name"),
+                            "command_run_id": row.get("command_run_id"),
+                            "command_key": row.get("command_key"),
+                            "command_type": row.get("command_type"),
+                            "profile": row.get("profile"),
+                            "command_status": row.get("command_status"),
+                            "request_id": row.get("request_id"),
+                            "request_key": row.get("request_key"),
+                            "request_kind": row.get("request_kind"),
+                            "api_name": row.get("api_name"),
+                            "request_source_path": row.get("request_source_path"),
+                            "request_status": row.get("request_status"),
+                            "requested_at": row.get("requested_at"),
+                            "completed_at": row.get("completed_at"),
+                        }
+                    )
+
+                st.write("**Request Context**")
+                st.json(_safe_json_loads(row.get("request_context")))
+
+                st.write("**Request Params**")
+                st.json(_safe_json_loads(row.get("request_params")))
+
+                st.write("**Response Meta**")
+                st.json(_safe_json_loads(row.get("response_meta")))
+
+                st.write("**Raw Record**")
+                st.json(_safe_json_loads(row.get("raw_record")))
 
 # Normalized Data Page
 elif page == "📋 Normalized Data":
@@ -666,13 +863,17 @@ elif page == "🚚 Collection Jobs":
         if st.button("Run Scheduler Tick Now"):
             status_code, body = _api_json("POST", "/collection/v1/scheduler/tick")
             if status_code == 200:
-                st.success(f"Scheduler tick completed. created_job_ids={body.get('created_job_ids', [])}")
+                st.success(
+                    f"Scheduler tick completed. created_job_ids={body.get('created_job_ids', [])}"
+                )
                 st.cache_data.clear()
                 st.rerun()
             else:
                 st.error(f"Scheduler tick failed: {body}")
 
-    job_plugin = st.selectbox("Plugin", ["dcp", "All"], index=0, key="collection_jobs_plugin")
+    job_plugin = st.selectbox(
+        "Plugin", ["dcp", "All"], index=0, key="collection_jobs_plugin"
+    )
     summary = get_collection_job_summary(job_plugin)
     col1, col2, col3, col4, col5 = st.columns(5)
     col1.metric("Queued", summary.get("queued") or 0)
@@ -709,14 +910,22 @@ elif page == "🚚 Collection Jobs":
             step=1,
             value=int(recent_days_default or 0),
         )
-        since_date = st.text_input("Since Date", value=str(selected_profile_config.get("since_date") or ""))
-        until_date = st.text_input("Until Date", value=str(selected_profile_config.get("until_date") or ""))
+        since_date = st.text_input(
+            "Since Date", value=str(selected_profile_config.get("since_date") or "")
+        )
+        until_date = st.text_input(
+            "Until Date", value=str(selected_profile_config.get("until_date") or "")
+        )
         include_existing = st.checkbox(
             "Include Existing",
             value=bool(selected_profile_config.get("include_existing", False)),
         )
-        force = st.checkbox("Force", value=bool(selected_profile_config.get("force", False)))
-        due_only = st.checkbox("Due Only", value=bool(selected_profile_config.get("due_only", False)))
+        force = st.checkbox(
+            "Force", value=bool(selected_profile_config.get("force", False))
+        )
+        due_only = st.checkbox(
+            "Due Only", value=bool(selected_profile_config.get("due_only", False))
+        )
         submitted = st.form_submit_button("Create Collection Job")
         if submitted:
             payload = {
@@ -783,14 +992,26 @@ elif page == "🚚 Collection Jobs":
         for job in jobs:
             label = f"{job['job_id']} [{job['status']}] {', '.join(job.get('dataset_keys') or [])}"
             with st.expander(label):
-                st.write(f"**Command:** `{json.dumps(job.get('command') or [], ensure_ascii=False)}`")
+                st.write(
+                    f"**Command:** `{json.dumps(job.get('command') or [], ensure_ascii=False)}`"
+                )
                 st.write(f"**CWD:** `{job.get('cwd')}`")
                 st.write(f"**DataHub URL:** `{job.get('datahub_url')}`")
                 st.write(f"**Dataset Keys:** {job.get('dataset_keys')}")
                 if job.get("stdout"):
-                    st.text_area("stdout tail", value=str(job["stdout"])[-4000:], height=180, key=f"stdout_{job['job_id']}")
+                    st.text_area(
+                        "stdout tail",
+                        value=str(job["stdout"])[-4000:],
+                        height=180,
+                        key=f"stdout_{job['job_id']}",
+                    )
                 if job.get("stderr"):
-                    st.text_area("stderr tail", value=str(job["stderr"])[-4000:], height=180, key=f"stderr_{job['job_id']}")
+                    st.text_area(
+                        "stderr tail",
+                        value=str(job["stderr"])[-4000:],
+                        height=180,
+                        key=f"stderr_{job['job_id']}",
+                    )
                 if job.get("result") is not None:
                     st.write("**Result JSON:**")
                     st.json(job["result"])
@@ -841,8 +1062,12 @@ elif page == "🚚 Collection Jobs":
                     st.rerun()
                 else:
                     st.error(body)
-            if cols[2].button("Trigger Profile Now", key=f"trigger_profile_{schedule['schedule_id']}"):
-                status_code, body = _api_json("POST", "/collection/v1/jobs", schedule["default_request"])
+            if cols[2].button(
+                "Trigger Profile Now", key=f"trigger_profile_{schedule['schedule_id']}"
+            ):
+                status_code, body = _api_json(
+                    "POST", "/collection/v1/jobs", schedule["default_request"]
+                )
                 if status_code == 202:
                     st.success(f"Created job: {body.get('job_id')}")
                     st.cache_data.clear()
@@ -863,7 +1088,9 @@ elif page == "🩺 Data Health":
     st.title("🩺 Data Health")
     st.markdown("---")
 
-    health_days = st.number_input("Daily Meeting Recent Days", min_value=1, max_value=365, value=14, step=1)
+    health_days = st.number_input(
+        "Daily Meeting Recent Days", min_value=1, max_value=365, value=14, step=1
+    )
     if st.button("Refresh Health"):
         st.cache_data.clear()
         st.rerun()
@@ -959,19 +1186,24 @@ elif page == "📈 Statistics":
     if not stats:
         st.info("No statistics available yet.")
     else:
-        df = pd.DataFrame([
-            {
-                "Plugin": row["plugin_id"],
-                "Run Count": row["run_count"],
-                "Fail Count": row["fail_count"],
-                "Success Rate": f"{((row['run_count'] - row['fail_count']) / row['run_count'] * 100):.1f}%"
-                if row["run_count"] > 0 else "N/A",
-                "Last Run": row["last_run"],
-                "Last Fail": row["last_fail"],
-                "Consecutive Fails": row["consecutive_fails"]
-            }
-            for row in stats
-        ])
+        df = pd.DataFrame(
+            [
+                {
+                    "Plugin": row["plugin_id"],
+                    "Run Count": row["run_count"],
+                    "Fail Count": row["fail_count"],
+                    "Success Rate": (
+                        f"{((row['run_count'] - row['fail_count']) / row['run_count'] * 100):.1f}%"
+                        if row["run_count"] > 0
+                        else "N/A"
+                    ),
+                    "Last Run": row["last_run"],
+                    "Last Fail": row["last_fail"],
+                    "Consecutive Fails": row["consecutive_fails"],
+                }
+                for row in stats
+            ]
+        )
 
         st.dataframe(df, use_container_width=True)
 

@@ -1403,6 +1403,12 @@ async def run_monitor_processing():
         },
     }
 
+@app.get("/health")
+def health():
+    return {
+        "status": "ok",
+        "service": "vibe-DataCollectorHub",
+    }
 
 @app.get("/health/v1/summary")
 async def health_summary(recent_days: int = Query(14, ge=1, le=365)):
