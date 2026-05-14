@@ -143,7 +143,7 @@ GET /api/v1/sandbox/map/summary    # 获取地图汇总数据（统计信息）
 
 - ADR-005: 三层数据架构
 - ADR-007: DCP 作为上游采集平台集成
-- ADR-008: SourceEvent 标准化接入协议
+- ADR-008: Legacy ingestion contract, superseded by batch ingestion
 
 ## 备注
 

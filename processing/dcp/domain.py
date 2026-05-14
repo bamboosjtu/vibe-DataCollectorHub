@@ -467,7 +467,7 @@ def extract_section_details(
     known_issues: list[str] = []
     if not codes["single_project_code"] or not codes["bidding_section_code"]:
         known_issues.append(
-            "section_details SourceEvent lacks request context for singleProjectCode/biddingSectionCode; downloader should add source_ref.context with single_project_code and bidding_section_code"
+            "section_details raw_event lacks request context for singleProjectCode/biddingSectionCode; downloader should emit request_context with single_project_code and bidding_section_code"
         )
 
     attributes = {

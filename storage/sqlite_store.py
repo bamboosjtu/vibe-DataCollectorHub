@@ -451,8 +451,6 @@ class SQLiteStore:
             self._ensure_column(
                 conn, "plugins", "execution_mode", "TEXT DEFAULT 'embedded_pipeline'"
             )
-            if self._raw_events_has_legacy_columns(conn):
-                self._rebuild_raw_events_release_schema(conn)
             self._ensure_column(conn, "raw_events", "raw_record_type", "TEXT")
             self._ensure_column(conn, "raw_events", "source_record_key", "TEXT")
             self._ensure_column(conn, "raw_events", "processing_error", "TEXT")
@@ -630,78 +628,6 @@ class SQLiteStore:
             if index_columns == columns:
                 return True
         return False
-
-    def _raw_events_has_legacy_columns(self, conn: sqlite3.Connection) -> bool:
-        columns = {
-            row["name"]
-            for row in conn.execute("PRAGMA table_info(raw_events)").fetchall()
-        }
-        return bool({"event_id", "idempotency_key", "payload", "source_ref", "event"} & columns)
-
-    def _rebuild_raw_events_release_schema(self, conn: sqlite3.Connection) -> None:
-        """Migrate old SourceEvent-shaped raw_events rows into the MVP raw layer."""
-        conn.execute("ALTER TABLE raw_events RENAME TO raw_events_legacy")
-        conn.execute(
-            """
-            CREATE TABLE raw_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                raw_event_key TEXT NOT NULL UNIQUE,
-                raw_event_id TEXT UNIQUE,
-                batch_id TEXT NOT NULL,
-                command_run_id TEXT NOT NULL,
-                request_id TEXT NOT NULL,
-                dataset_key TEXT NOT NULL,
-                raw_record_type TEXT,
-                raw_record TEXT NOT NULL,
-                source_path TEXT,
-                source_record_id TEXT,
-                source_record_hash TEXT,
-                source_record_key TEXT,
-                content_hash TEXT NOT NULL,
-                occurred_at TIMESTAMP,
-                collected_at TIMESTAMP NOT NULL,
-                occurred_at_epoch REAL,
-                collected_at_epoch REAL,
-                processing_status TEXT DEFAULT 'pending',
-                processing_error TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-            """
-        )
-        conn.execute(
-            """
-            INSERT INTO raw_events (
-                id, raw_event_key, raw_event_id, batch_id, command_run_id,
-                request_id, dataset_key, raw_record_type, raw_record, source_path,
-                source_record_id, source_record_hash, source_record_key,
-                content_hash, occurred_at, collected_at, occurred_at_epoch,
-                collected_at_epoch, processing_status, created_at
-            )
-            SELECT
-                id,
-                COALESCE(raw_event_key, idempotency_key || ':' || COALESCE(source_record_hash, '')),
-                COALESCE(raw_event_id, event_id),
-                COALESCE(batch_id, 'legacy_batch'),
-                COALESCE(command_run_id, 'legacy_command'),
-                COALESCE(request_id, 'legacy_request_' || id),
-                COALESCE(dataset_key, 'unknown'),
-                NULL,
-                COALESCE(raw_payload, json_extract(payload, '$.raw'), payload, '{}'),
-                source_path,
-                source_record_id,
-                source_record_hash,
-                COALESCE(source_record_key, idempotency_key),
-                COALESCE(source_record_hash, raw_event_key, idempotency_key),
-                occurred_at,
-                collected_at,
-                occurred_at_epoch,
-                collected_at_epoch,
-                COALESCE(processing_status, 'pending'),
-                created_at
-            FROM raw_events_legacy
-            """
-        )
-        conn.execute("DROP TABLE raw_events_legacy")
 
     def _default_config_from_schema(
         self, config_schema: dict[str, Any]
@@ -1012,199 +938,8 @@ class SQLiteStore:
         finally:
             conn.close()
 
-    def _fallback_dataset_key(self, event: Dict[str, Any]) -> Optional[str]:
-        from core.dataset_resolver import resolve_dataset_key
-
-        return resolve_dataset_key(event)
-
-    def save_raw_event(
-        self, event: Dict[str, Any], dataset_key: Optional[str] = None
-    ) -> tuple[str, Optional[int]]:
-        """
-        Convert an internal legacy SourceEvent fixture into the MVP raw_events table.
-
-        This is not a public ingestion path. Release ingestion remains
-        POST /ingestion/v1/batch; tests and old helpers use this method only to
-        seed one-record raw_events rows.
-
-        Returns:
-            ("accepted", rowid) for new events
-            ("duplicated", existing rowid) for repeated raw_event_key
-        """
-        conn = self._get_connection()
-        try:
-            source_ref = event.get("source_ref") or {}
-            collection = source_ref.get("collection")
-            page_name = source_ref.get("page_name")
-            api_name = source_ref.get("api_name")
-            source_file = source_ref.get("source_file")
-            if dataset_key is None:
-                if event.get("source_system") == "dcp":
-                    raise ValueError("DCP raw event requires explicit dataset_key")
-                dataset_key = self._fallback_dataset_key(event)
-            payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
-            raw_payload = payload.get("raw") if isinstance(payload.get("raw"), dict) else payload
-            source_record_key = event.get("idempotency_key") or event.get("event_id")
-            raw_event_key = f"{event['idempotency_key']}:{event.get('source_record_hash') or ''}"
-            occurred_at_epoch = self._timestamp_epoch(event.get("occurred_at"))
-            collected_at_epoch = self._timestamp_epoch(event.get("collected_at"))
-            raw_event_id = event.get("event_id") or raw_event_key
-            batch_id = source_ref.get("batch_id") or "legacy_batch"
-            command_run_id = source_ref.get("command_run_id") or f"legacy_command_{dataset_key}"
-            request_id = source_ref.get("request_id") or f"legacy_request_{raw_event_id}"
-            source_path = source_ref.get("record_path")
-            if source_path in (None, "") and source_ref.get("record_index") is not None:
-                source_path = f"records[{source_ref.get('record_index')}]"
-            content_hash = event.get("source_record_hash") or hashlib.sha256(
-                json.dumps(raw_payload, ensure_ascii=False, sort_keys=True, default=str).encode(
-                    "utf-8"
-                )
-            ).hexdigest()
-            request_context = source_ref.get("context")
-            if not isinstance(request_context, dict):
-                request_context = {}
-            request_context = {
-                **request_context,
-                "collection": collection,
-                "page_name": page_name,
-                "api_name": api_name,
-                "source_file": source_file,
-            }
-
-            cursor = conn.execute(
-                "SELECT id FROM raw_events WHERE raw_event_key = ?",
-                (raw_event_key,),
-            )
-            existing = cursor.fetchone()
-            if existing:
-                return "duplicated", existing["id"]
-
-            now = datetime.now()
-            conn.execute(
-                """
-                INSERT INTO collection_batches (
-                    batch_id, batch_key, source_system, plugin_id, downloader_name,
-                    trigger_type, status, command_count, request_count,
-                    raw_record_count, error_count, metadata_snapshot,
-                    config_snapshot, result_summary, started_at, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1, 1, 0, '{}', '{}', '{}', ?, ?)
-                ON CONFLICT(batch_id) DO UPDATE SET
-                    request_count = collection_batches.request_count + 1,
-                    raw_record_count = collection_batches.raw_record_count + 1,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    batch_id,
-                    f"{dataset_key}_legacy_seed",
-                    event.get("source_system", "dcp"),
-                    "dcp",
-                    "vibe-downloader-dcp",
-                    "manual",
-                    "succeeded",
-                    event.get("collected_at"),
-                    now,
-                ),
-            )
-            conn.execute(
-                """
-                INSERT INTO collection_commands (
-                    command_run_id, batch_id, command_key, command_type,
-                    source_system, plugin_id, downloader_name, dataset_keys,
-                    params, status, request_count, raw_record_count,
-                    success_request_count, failed_request_count, error_count,
-                    started_at, updated_at
-                )
-                VALUES (?, ?, ?, 'legacy_seed', ?, 'dcp', 'vibe-downloader-dcp', ?, '{}',
-                        'succeeded', 1, 1, 1, 0, 0, ?, ?)
-                ON CONFLICT(command_run_id) DO UPDATE SET
-                    request_count = collection_commands.request_count + 1,
-                    raw_record_count = collection_commands.raw_record_count + 1,
-                    success_request_count = collection_commands.success_request_count + 1,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    command_run_id,
-                    batch_id,
-                    f"{dataset_key}_legacy_seed",
-                    event.get("source_system", "dcp"),
-                    self._json_text([dataset_key], []),
-                    event.get("collected_at"),
-                    now,
-                ),
-            )
-            conn.execute(
-                """
-                INSERT INTO collection_requests (
-                    request_id, batch_id, command_run_id, dataset_key,
-                    request_key, request_kind, source_system, plugin_id,
-                    downloader_name, api_name, source_path, request_params,
-                    request_context, response_meta, status, raw_record_count,
-                    error_count, requested_at, completed_at, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, 'legacy_seed', ?, 'dcp',
-                        'vibe-downloader-dcp', ?, ?, '{}', ?, '{}',
-                        'succeeded', 1, 0, ?, ?, ?)
-                ON CONFLICT(request_id) DO UPDATE SET
-                    raw_record_count = collection_requests.raw_record_count + 1,
-                    request_context = excluded.request_context,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    request_id,
-                    batch_id,
-                    command_run_id,
-                    dataset_key,
-                    source_ref.get("request_key") or raw_event_key,
-                    event.get("source_system", "dcp"),
-                    api_name,
-                    source_file,
-                    self._json_text(request_context, {}),
-                    event.get("collected_at"),
-                    event.get("collected_at"),
-                    now,
-                ),
-            )
-            cursor = conn.execute(
-                """
-                INSERT INTO raw_events (
-                    raw_event_key, raw_event_id, batch_id, command_run_id, request_id,
-                    dataset_key, raw_record_type, raw_record, source_path,
-                    source_record_id, source_record_hash, source_record_key,
-                    content_hash, occurred_at, collected_at, occurred_at_epoch,
-                    collected_at_epoch, processing_status, created_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    raw_event_key,
-                    raw_event_id,
-                    batch_id,
-                    command_run_id,
-                    request_id,
-                    dataset_key,
-                    event.get("source_event_type"),
-                    json.dumps(raw_payload, ensure_ascii=False, default=str),
-                    source_path,
-                    event.get("source_record_id"),
-                    event.get("source_record_hash"),
-                    source_record_key,
-                    content_hash,
-                    event.get("occurred_at"),
-                    event["collected_at"],
-                    occurred_at_epoch,
-                    collected_at_epoch,
-                    "pending",
-                    now,
-                ),
-            )
-            conn.commit()
-            return "accepted", cursor.lastrowid
-        finally:
-            conn.close()
-
     def count_raw_events(self) -> int:
-        """Count raw SourceEvent rows."""
+        """Count MVP raw_event rows."""
         conn = self._get_connection()
         try:
             cursor = conn.execute("SELECT COUNT(*) AS count FROM raw_events")
@@ -1268,7 +1003,7 @@ class SQLiteStore:
         self, idempotency_key: str
     ) -> Optional[Dict[str, Any]]:
         """
-        Get a raw SourceEvent by idempotency key.
+        Get a raw_event by legacy idempotency key.
 
         Compatibility only. Normalizers should use raw_event_key or
         source_record_key version-aware methods.
@@ -1295,7 +1030,7 @@ class SQLiteStore:
     def get_raw_event_by_raw_event_key(
         self, raw_event_key: str
     ) -> Optional[Dict[str, Any]]:
-        """Get a raw SourceEvent by versioned raw_event_key."""
+        """Get a raw_event by versioned raw_event_key."""
         conn = self._get_connection()
         try:
             cursor = conn.execute(
@@ -1330,7 +1065,7 @@ class SQLiteStore:
     def get_latest_raw_event_by_source_record_key(
         self, source_record_key: str
     ) -> Optional[Dict[str, Any]]:
-        """Get the newest raw SourceEvent version for a source record."""
+        """Get the newest raw_event version for a source record."""
         conn = self._get_connection()
         try:
             cursor = conn.execute(
@@ -1356,7 +1091,7 @@ class SQLiteStore:
         offset: int = 0,
         after_id: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
-        """List raw SourceEvents, optionally filtered by dataset."""
+        """List raw_events, optionally filtered by dataset."""
         conn = self._get_connection()
         try:
             where = ["1=1"]

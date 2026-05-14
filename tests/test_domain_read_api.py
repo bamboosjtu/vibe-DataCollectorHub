@@ -10,6 +10,7 @@ import api.server as server
 from core.plugin_manager import PluginManager
 from processing.normalizer_runner import NormalizerRunner
 from storage.sqlite_store import SQLiteStore
+from conftest import seed_test_records
 
 
 def _make_store() -> SQLiteStore:
@@ -43,12 +44,9 @@ def _event(
     context: dict | None = None,
 ) -> dict:
     return {
-        "schema_version": "source_event.v1",
-        "event_id": f"evt-{dataset_key}-{suffix}",
+        "raw_event_id": f"raw-{dataset_key}-{suffix}",
         "idempotency_key": f"dcp:projectPages:{page_name}:{api_name}:{suffix}",
         "source_system": "dcp",
-        "source_event_type": "dcp.record",
-        "event_granularity": "record",
         "source_record_id": f"record-{suffix}",
         "source_record_hash": f"hash-{suffix}",
         "occurred_at": "2026-05-08T08:30:00+08:00",
@@ -70,75 +68,84 @@ def _event(
 
 
 def _seed_domain_graph(store: SQLiteStore) -> None:
-    store.save_raw_event(
-        _event(
-            suffix="preconstruction",
-            dataset_key="project_preconstruction",
-            page_name="项目前期成果",
-            api_name="preconstruction_results_detail",
-            raw={
-                "prjCode": "PRJ-001",
-                "prjName": "示例工程",
-                "sinList": [
-                    {
-                        "singleProjectCode": "SP-001",
-                        "singleProjectName": "单项一",
-                        "bidSectList": [
-                            {
-                                "biddingSectionCode": "BS-001",
-                                "biddingSectionName": "标段一",
-                            }
-                        ],
-                    }
-                ],
-            },
-        ),
-        dataset_key="project_preconstruction",
+    seed_test_records(
+        store,
+        "project_preconstruction",
+        [
+            _event(
+                suffix="preconstruction",
+                dataset_key="project_preconstruction",
+                page_name="项目前期成果",
+                api_name="preconstruction_results_detail",
+                raw={
+                    "prjCode": "PRJ-001",
+                    "prjName": "示例工程",
+                    "sinList": [
+                        {
+                            "singleProjectCode": "SP-001",
+                            "singleProjectName": "单项一",
+                            "bidSectList": [
+                                {
+                                    "biddingSectionCode": "BS-001",
+                                    "biddingSectionName": "标段一",
+                                }
+                            ],
+                        }
+                    ],
+                },
+            )
+        ],
     )
-    store.save_raw_event(
-        _event(
-            suffix="line-section",
-            dataset_key="line_section",
-            page_name="区段划分",
-            api_name="section_details",
-            raw={
-                "id": "LS-001",
-                "sectionName": "一区段",
-                "sectionVo": {"towerNoList": ["G1", "韶鹤Ⅰ线#001"]},
-            },
-            context={
-                "project_code": "PRJ-001",
-                "project_name": "示例工程",
-                "single_project_code": "SP-001",
-                "single_project_name": "单项一",
-                "bidding_section_code": "BS-001",
-                "bidding_section_name": "标段一",
-                "line_section_id": "LS-001",
-                "line_section_name": "一区段",
-            },
-        ),
-        dataset_key="line_section",
+    seed_test_records(
+        store,
+        "line_section",
+        [
+            _event(
+                suffix="line-section",
+                dataset_key="line_section",
+                page_name="区段划分",
+                api_name="section_details",
+                raw={
+                    "id": "LS-001",
+                    "sectionName": "一区段",
+                    "sectionVo": {"towerNoList": ["G1", "韶鹤Ⅰ线#001"]},
+                },
+                context={
+                    "project_code": "PRJ-001",
+                    "project_name": "示例工程",
+                    "single_project_code": "SP-001",
+                    "single_project_name": "单项一",
+                    "bidding_section_code": "BS-001",
+                    "bidding_section_name": "标段一",
+                    "line_section_id": "LS-001",
+                    "line_section_name": "一区段",
+                },
+            )
+        ],
     )
-    store.save_raw_event(
-        _event(
-            suffix="year-progress",
-            dataset_key="year_progress",
-            page_name="年度进度计划分析",
-            api_name="yearly_progress_analysis",
-            raw={
-                "id": "PROG-001",
-                "prjCode": "PRJ-001",
-                "prjName": "示例工程",
-                "status": "在建",
-                "singleList": [
-                    {
-                        "singleProjectCode": "SP-001",
-                        "singleProjectName": "单项一",
-                    }
-                ],
-            },
-        ),
-        dataset_key="year_progress",
+    seed_test_records(
+        store,
+        "year_progress",
+        [
+            _event(
+                suffix="year-progress",
+                dataset_key="year_progress",
+                page_name="年度进度计划分析",
+                api_name="yearly_progress_analysis",
+                raw={
+                    "id": "PROG-001",
+                    "prjCode": "PRJ-001",
+                    "prjName": "示例工程",
+                    "status": "在建",
+                    "singleList": [
+                        {
+                            "singleProjectCode": "SP-001",
+                            "singleProjectName": "单项一",
+                        }
+                    ],
+                },
+            )
+        ],
     )
 
     assert NormalizerRunner(store).run("project_hierarchy", mode="full")["failed"] == 0

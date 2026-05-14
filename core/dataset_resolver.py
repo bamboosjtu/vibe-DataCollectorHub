@@ -1,4 +1,4 @@
-"""Dataset resolution for raw SourceEvent ingestion."""
+"""Dataset resolution helpers for legacy raw-event migration fixtures."""
 
 from typing import Any
 

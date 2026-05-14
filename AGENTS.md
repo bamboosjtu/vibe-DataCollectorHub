@@ -11,9 +11,9 @@ It owns ingestion, raw event storage, canonical normalization, API keys, cache, 
 - Consumers must access data through serving APIs.
 
 ## Ingestion
-- Validate SourceEvent schema.
-- Store raw events before normalization.
-- Use idempotency keys.
+- Validate ingestion.batch.v1 payloads.
+- Store collection_batches, collection_commands, collection_requests, raw_events, errors, and checkpoints before normalization.
+- Use stable raw_event keys for duplicate suppression.
 - Preserve raw payload for traceability.
 
 ## Serving

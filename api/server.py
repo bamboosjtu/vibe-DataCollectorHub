@@ -24,7 +24,6 @@ from zoneinfo import ZoneInfo
 
 from fastapi import (
     BackgroundTasks,
-    Body,
     FastAPI,
     HTTPException,
     Query,
@@ -47,7 +46,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.plugin_manager import PluginManager
 from core.plugin_config_validator import validate_plugin_runtime_config
-from core.dataset_resolver import resolve_dataset_key, source_ref_matches_dataset
 from core.paths import DEFAULT_DB_PATH, PLUGINS_DIR
 from core.scheduler import TaskScheduler
 from core.websocket_manager import WebSocketBroadcastManager
@@ -138,24 +136,6 @@ class DataQueryResponse(BaseModel):
 
     total: int
     items: List[Dict[str, Any]]
-
-
-class IngestionError(BaseModel):
-    """Per-event ingestion validation error."""
-
-    index: int
-    event_id: Optional[str] = None
-    idempotency_key: Optional[str] = None
-    error: str
-
-
-class IngestionResponse(BaseModel):
-    """Batch ingestion result."""
-
-    accepted: int
-    duplicated: int
-    failed: int
-    errors: List[IngestionError]
 
 
 class CollectionBatchV1(BaseModel):
@@ -465,65 +445,6 @@ app.add_middleware(
 
 # API Routes
 
-REQUIRED_SOURCE_EVENT_FIELDS = (
-    "schema_version",
-    "event_id",
-    "idempotency_key",
-    "source_system",
-    "source_event_type",
-    "event_granularity",
-    "occurred_at",
-    "collected_at",
-    "payload",
-    "source_ref",
-)
-
-
-def _extract_ingestion_events(body: Any) -> list[Any]:
-    if isinstance(body, list):
-        return body
-    if isinstance(body, dict) and isinstance(body.get("events"), list):
-        return body["events"]
-    raise ValueError(
-        "Request body must be a SourceEvent array or an object with an events array."
-    )
-
-
-def _validate_source_event(event: Any) -> list[str]:
-    errors: list[str] = []
-    if not isinstance(event, dict):
-        return ["event must be an object"]
-
-    for field in REQUIRED_SOURCE_EVENT_FIELDS:
-        if field not in event or event.get(field) in (None, ""):
-            errors.append(f"missing required field: {field}")
-
-    if event.get("schema_version") != "source_event.v1":
-        errors.append("schema_version must be source_event.v1")
-
-    if event.get("event_granularity") not in {"envelope", "api_result", "record"}:
-        errors.append("event_granularity must be one of: envelope, api_result, record")
-
-    if not event.get("source_record_id") and not event.get("source_record_hash"):
-        errors.append("source_record_id or source_record_hash is required")
-
-    if "payload" in event and not isinstance(event.get("payload"), dict):
-        errors.append("payload must be an object")
-
-    if "source_ref" in event and not isinstance(event.get("source_ref"), dict):
-        errors.append("source_ref must be an object")
-
-    for timestamp_field in ("occurred_at", "collected_at"):
-        timestamp_value = event.get(timestamp_field)
-        if timestamp_value not in (None, ""):
-            try:
-                datetime.fromisoformat(str(timestamp_value).replace("Z", "+00:00"))
-            except ValueError:
-                errors.append(f"{timestamp_field} must be ISO datetime")
-
-    return errors
-
-
 def _merge_runtime_config(
     current: Dict[str, Any], updates: Dict[str, Any]
 ) -> Dict[str, Any]:
@@ -534,75 +455,6 @@ def _merge_runtime_config(
         else:
             merged[key] = value
     return merged
-
-
-def _resolve_and_validate_ingestion_dataset(event: Dict[str, Any]) -> tuple[Optional[str], list[str]]:
-    """Resolve DCP dataset_key and enforce runtime config enablement."""
-    if event.get("source_system") != "dcp":
-        return None, []
-
-    dcp_plugin = store.get_plugin("dcp")
-    if not dcp_plugin:
-        return None, ["dataset_key=None: dcp plugin is not registered"]
-    if int(dcp_plugin.get("enabled", 0)) == 0:
-        return None, ["dataset_key=None: dcp plugin is disabled"]
-    if event.get("event_granularity") != "record":
-        return None, ["dataset_key=None: DCP event_granularity must be record"]
-
-    payload = event.get("payload")
-    if not isinstance(payload, dict) or not isinstance(payload.get("raw"), dict):
-        return None, ["dataset_key=None: DCP record event requires payload.raw object"]
-
-    source_ref = event.get("source_ref") if isinstance(event.get("source_ref"), dict) else {}
-    required_source_ref_fields = (
-        "collection",
-        "page_name",
-        "api_name",
-        "raw_data_index",
-        "record_index",
-        "record_path",
-        "source_file",
-    )
-    missing_source_ref_fields = [
-        field
-        for field in required_source_ref_fields
-        if field not in source_ref or source_ref.get(field) in (None, "")
-    ]
-    if missing_source_ref_fields:
-        return None, [
-            "dataset_key=None: DCP source_ref missing required field(s): "
-            + ", ".join(missing_source_ref_fields)
-        ]
-
-    if not event.get("source_record_hash"):
-        return None, ["dataset_key=None: DCP event requires source_record_hash"]
-
-    try:
-        runtime_config = store.get_plugin_runtime_config("dcp")["config"]
-    except Exception as exc:
-        return None, [f"dataset_key=None: failed to load dcp runtime config: {exc}"]
-
-    dataset_key = resolve_dataset_key(event, runtime_config, allow_fallback=False)
-    if not dataset_key:
-        return None, ["dataset_key=None: unable to resolve DCP dataset"]
-
-    datasets = runtime_config.get("datasets") or {}
-    if dataset_key not in datasets:
-        return dataset_key, [f"dataset_key={dataset_key}: not defined in dcp runtime config"]
-
-    matches, mismatch_reason = source_ref_matches_dataset(event, datasets[dataset_key])
-    if not matches:
-        return dataset_key, [f"dataset_key={dataset_key}: source_ref mismatch: {mismatch_reason}"]
-
-    enabled_datasets = runtime_config.get("enabled_datasets") or []
-    if dataset_key not in enabled_datasets:
-        return dataset_key, [f"dataset_key={dataset_key}: not listed in enabled_datasets"]
-
-    dataset_config = datasets.get(dataset_key) or {}
-    if dataset_config.get("enabled") is not True:
-        return dataset_key, [f"dataset_key={dataset_key}: dataset config is disabled"]
-
-    return dataset_key, []
 
 
 def extract_last_json_object(stdout: str) -> dict | None:
@@ -1312,93 +1164,6 @@ async def ingest_batch_v1(batch: IngestionBatchV1):
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return IngestionBatchResponse(accepted=True, **stats)
-
-
-async def ingest_source_events(body: Any = Body(...)):
-    """
-    Legacy SourceEvent ingestion helper retained only until old tests and
-    normalizers are migrated. It is intentionally not registered as an API
-    route; release ingestion is POST /ingestion/v1/batch.
-
-    This endpoint only validates and stores raw ingestion events. It does not
-    normalize, schedule, cache, or serve consumer DTOs.
-    """
-    try:
-        events = _extract_ingestion_events(body)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-
-    accepted = 0
-    duplicated = 0
-    failed = 0
-    errors: list[IngestionError] = []
-
-    for index, event in enumerate(events):
-        validation_errors = _validate_source_event(event)
-        if validation_errors:
-            failed += 1
-            errors.append(
-                IngestionError(
-                    index=index,
-                    event_id=event.get("event_id") if isinstance(event, dict) else None,
-                    idempotency_key=(
-                        event.get("idempotency_key")
-                        if isinstance(event, dict)
-                        else None
-                    ),
-                    error="; ".join(validation_errors),
-                )
-            )
-            continue
-
-        dataset_key, dataset_errors = _resolve_and_validate_ingestion_dataset(event)
-        if dataset_errors:
-            failed += 1
-            errors.append(
-                IngestionError(
-                    index=index,
-                    event_id=event.get("event_id"),
-                    idempotency_key=event.get("idempotency_key"),
-                    error="; ".join(dataset_errors),
-                )
-            )
-            continue
-
-        try:
-            status, _ = store.save_raw_event(event, dataset_key=dataset_key)
-        except Exception as exc:
-            failed += 1
-            errors.append(
-                IngestionError(
-                    index=index,
-                    event_id=event.get("event_id"),
-                    idempotency_key=event.get("idempotency_key"),
-                    error=str(exc),
-                )
-            )
-            continue
-
-        if status == "accepted":
-            accepted += 1
-        elif status == "duplicated":
-            duplicated += 1
-        else:
-            failed += 1
-            errors.append(
-                IngestionError(
-                    index=index,
-                    event_id=event.get("event_id"),
-                    idempotency_key=event.get("idempotency_key"),
-                    error=f"unknown storage status: {status}",
-                )
-            )
-
-    return IngestionResponse(
-        accepted=accepted,
-        duplicated=duplicated,
-        failed=failed,
-        errors=errors,
-    )
 
 
 @app.post("/processing/v1/run")

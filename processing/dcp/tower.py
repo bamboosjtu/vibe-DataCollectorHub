@@ -71,15 +71,15 @@ def normalize_tower(
         raw.get("towerNo") or raw.get("towerNoName") or raw.get("towerName")
     )
     known_issues: list[str] = []
-    legacy_entity_key = (
+    dcp_entity_key_fallback = (
         f"dcp:tower:{tower_id}" if tower_id not in (None, "") else None
     )
     if tower_no is None:
-        if legacy_entity_key is None:
+        if dcp_entity_key_fallback is None:
             return None, "missing tower identity"
-        entity_key = legacy_entity_key
+        entity_key = dcp_entity_key_fallback
         known_issues.append(
-            "tower_details missing stable tower number; canonical key fell back to legacy DCP id"
+            "tower_details missing stable tower number; canonical key fell back to DCP id"
         )
     elif single_project_code not in (None, "") and bidding_section_code not in (None, ""):
         entity_key = dcp_tower_key(
@@ -101,7 +101,7 @@ def normalize_tower(
     attributes = {
         "tower_id": tower_id,
         "dcp_tower_id": tower_id,
-        "legacy_entity_key": legacy_entity_key,
+        "dcp_entity_key_fallback": dcp_entity_key_fallback,
         "project_code": project_code,
         "single_project_code": single_project_code,
         "bidding_section_code": bidding_section_code,

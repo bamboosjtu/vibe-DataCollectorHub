@@ -7,6 +7,7 @@ from core.plugin_manager import PluginManager
 from processing.dcp.keys import dcp_tower_key
 from processing.normalizer_runner import NormalizerRunner
 from storage.sqlite_store import SQLiteStore
+from conftest import seed_test_records
 
 
 def _make_store() -> SQLiteStore:
@@ -31,12 +32,9 @@ def _event(
     context: dict | None = None,
 ) -> dict:
     return {
-        "schema_version": "source_event.v1",
-        "event_id": f"evt-{dataset_key}-{suffix}",
+        "raw_event_id": f"raw-{dataset_key}-{suffix}",
         "idempotency_key": f"dcp:projectPages:{page_name}:{api_name}:{suffix}",
         "source_system": "dcp",
-        "source_event_type": "dcp.record",
-        "event_granularity": "record",
         "source_record_id": f"record-{suffix}",
         "source_record_hash": f"hash-{suffix}",
         "occurred_at": "2026-05-03T08:30:00+08:00",
@@ -81,7 +79,7 @@ def test_one_raw_event_can_generate_multiple_entities_and_relationships() -> Non
             ],
         },
     )
-    store.save_raw_event(event, dataset_key="project_preconstruction")
+    seed_test_records(store, "project_preconstruction", [event])
 
     result = NormalizerRunner(store).run("project_hierarchy")
 
@@ -114,7 +112,7 @@ def test_section_single_projects_generates_single_project_and_bidding_section() 
             ],
         },
     )
-    store.save_raw_event(event, dataset_key="line_section")
+    seed_test_records(store, "line_section", [event])
 
     result = NormalizerRunner(store).run("line_section")
 
@@ -140,7 +138,7 @@ def test_section_details_generates_line_section_and_tower_sequence_relationships
             "sectionVo": {"towerNoList": ["T001", "T002"]},
         },
     )
-    store.save_raw_event(event, dataset_key="line_section")
+    seed_test_records(store, "line_section", [event])
 
     result = NormalizerRunner(store).run("line_section")
 
@@ -178,7 +176,7 @@ def test_section_details_missing_context_marks_known_issue_without_fake_hierarch
             "sectionVo": {"towerNoList": ["T009"]},
         },
     )
-    store.save_raw_event(event, dataset_key="line_section")
+    seed_test_records(store, "line_section", [event])
 
     result = NormalizerRunner(store).run("line_section")
 
@@ -209,7 +207,7 @@ def test_section_details_uses_source_context_for_scoped_tower_relationships() ->
             "line_section_name": "三区段",
         },
     )
-    store.save_raw_event(event, dataset_key="line_section")
+    seed_test_records(store, "line_section", [event])
 
     result = NormalizerRunner(store).run("line_section")
 
@@ -245,7 +243,7 @@ def test_section_details_context_scopes_multiple_tower_sequence_keys() -> None:
             "bidding_section_code": "B01",
         },
     )
-    store.save_raw_event(event, dataset_key="line_section")
+    seed_test_records(store, "line_section", [event])
 
     result = NormalizerRunner(store).run("line_section")
 
@@ -279,7 +277,7 @@ def test_section_details_marks_plain_tower_numbers_as_physical_candidates() -> N
             "bidding_section_code": "B01",
         },
     )
-    store.save_raw_event(event, dataset_key="line_section")
+    seed_test_records(store, "line_section", [event])
 
     NormalizerRunner(store).run("line_section")
 
@@ -306,7 +304,7 @@ def test_section_details_marks_line_name_tower_nodes_as_reference_nodes() -> Non
             "bidding_section_code": "B01",
         },
     )
-    store.save_raw_event(event, dataset_key="line_section")
+    seed_test_records(store, "line_section", [event])
 
     NormalizerRunner(store).run("line_section")
 
@@ -333,7 +331,7 @@ def test_section_details_marks_station_dragon_gate_nodes_as_reference_nodes() ->
             "bidding_section_code": "B01",
         },
     )
-    store.save_raw_event(event, dataset_key="line_section")
+    seed_test_records(store, "line_section", [event])
 
     NormalizerRunner(store).run("line_section")
 
@@ -360,7 +358,7 @@ def test_section_details_marks_original_line_number_nodes_as_reference_nodes() -
             "bidding_section_code": "B01",
         },
     )
-    store.save_raw_event(event, dataset_key="line_section")
+    seed_test_records(store, "line_section", [event])
 
     NormalizerRunner(store).run("line_section")
 
@@ -387,7 +385,7 @@ def test_section_details_marks_gateframe_nodes_as_reference_nodes() -> None:
             "bidding_section_code": "B01",
         },
     )
-    store.save_raw_event(event, dataset_key="line_section")
+    seed_test_records(store, "line_section", [event])
 
     NormalizerRunner(store).run("line_section")
 
@@ -411,7 +409,7 @@ def test_flat_hierarchy_can_use_source_context_when_raw_lacks_codes() -> None:
             "bidding_section_code": "BS-FLAT",
         },
     )
-    store.save_raw_event(event, dataset_key="tower")
+    seed_test_records(store, "tower", [event])
 
     result = NormalizerRunner(store).run("project_hierarchy")
 
@@ -442,7 +440,7 @@ def test_year_progress_generates_project_progress_and_project_relationship() -> 
             ],
         },
     )
-    store.save_raw_event(event, dataset_key="year_progress")
+    seed_test_records(store, "year_progress", [event])
 
     result = NormalizerRunner(store).run("year_progress")
 
@@ -466,7 +464,7 @@ def test_year_progress_without_project_code_skips_with_summary() -> None:
         api_name="yearly_progress_analysis",
         raw={"id": "PROG-002", "projectName": "字段不明确"},
     )
-    store.save_raw_event(event, dataset_key="year_progress")
+    seed_test_records(store, "year_progress", [event])
 
     result = NormalizerRunner(store).run("year_progress")
 
@@ -498,7 +496,10 @@ def test_canonical_relationship_store_get_and_list() -> None:
 
 def test_domain_canonical_acceptance_entities_and_relationships_land_in_store() -> None:
     store = _make_store()
-    store.save_raw_event(
+    seed_test_records(
+        store,
+        "project_preconstruction",
+        [
         _event(
             suffix="accept-hierarchy",
             dataset_key="project_preconstruction",
@@ -521,9 +522,12 @@ def test_domain_canonical_acceptance_entities_and_relationships_land_in_store() 
                 ],
             },
         ),
-        dataset_key="project_preconstruction",
+        ],
     )
-    store.save_raw_event(
+    seed_test_records(
+        store,
+        "line_section",
+        [
         _event(
             suffix="accept-section",
             dataset_key="line_section",
@@ -538,9 +542,12 @@ def test_domain_canonical_acceptance_entities_and_relationships_land_in_store() 
                 "sectionVo": {"towerNoList": ["T001"]},
             },
         ),
-        dataset_key="line_section",
+        ],
     )
-    store.save_raw_event(
+    seed_test_records(
+        store,
+        "year_progress",
+        [
         _event(
             suffix="accept-progress",
             dataset_key="year_progress",
@@ -552,7 +559,7 @@ def test_domain_canonical_acceptance_entities_and_relationships_land_in_store() 
                 "planYear": "2026",
             },
         ),
-        dataset_key="year_progress",
+        ],
     )
 
     hierarchy_result = NormalizerRunner(store).run("project_hierarchy", mode="full")

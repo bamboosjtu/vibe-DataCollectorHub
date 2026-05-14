@@ -10,24 +10,7 @@ from core.plugin_manager import PluginManager
 import processing.normalizer_runner as normalizer_runner
 from processing.normalizer_runner import NormalizerRunner
 from storage.sqlite_store import SQLiteStore
-
-LEGACY_SOURCE_EVENT_TESTS = {
-    "test_station_source_event_to_sandbox_skeleton_flow",
-    "test_daily_meeting_source_event_to_work_point_and_summary",
-    "test_non_hunan_coordinates_do_not_reach_sandbox_apis",
-    "test_strict_hunan_boundary_filters_formerly_loose_coordinates",
-    "test_downloader_realistic_source_events_feed_sandbox_apis",
-    "test_tower_details_source_event_to_tower_canonical",
-    "test_tower_single_projects_is_skipped_by_tower_normalizer",
-    "test_sandbox_skeleton_returns_towers_and_stations_without_raw",
-}
-
-
-def setup_function(function):
-    if function.__name__ in LEGACY_SOURCE_EVENT_TESTS:
-        pytest.skip(
-            "Legacy SourceEvent /ingestion/v1/events test; release ingestion is /ingestion/v1/batch."
-        )
+from conftest import seed_test_records
 
 
 def _make_store() -> SQLiteStore:
@@ -60,12 +43,9 @@ def _station_event(
 ) -> dict:
     station_id = station_id or f"station-{suffix}"
     return {
-        "schema_version": "source_event.v1",
-        "event_id": f"evt-station-{suffix}",
+        "raw_event_id": f"raw-station-{suffix}",
         "idempotency_key": f"dcp:projectPages:变电站坐标:substation_coordinates:station-{suffix}",
         "source_system": "dcp",
-        "source_event_type": "dcp.record",
-        "event_granularity": "record",
         "source_record_id": f"station-{suffix}",
         "source_record_hash": f"hash-station-{suffix}",
         "occurred_at": "2026-05-03T21:30:12+08:00",
@@ -103,12 +83,9 @@ def _daily_meeting_event(
     elif isinstance(work_date, int):
         source_file_date = datetime.fromtimestamp(work_date / 1000).date().isoformat()
     return {
-        "schema_version": "source_event.v1",
-        "event_id": f"evt-daily-meeting-{suffix}",
+        "raw_event_id": f"raw-daily-meeting-{suffix}",
         "idempotency_key": f"dcp:safePages:meetingListAdmin:queryToolBoxTalkListPagePc:meeting-{suffix}",
         "source_system": "dcp",
-        "source_event_type": "dcp.record",
-        "event_granularity": "record",
         "source_record_id": f"meeting-{suffix}",
         "source_record_hash": f"hash-daily-meeting-{suffix}",
         "occurred_at": "2026-05-03T08:30:00+08:00",
@@ -164,12 +141,9 @@ def _tower_event(
     if include_id:
         raw["id"] = f"tower-{suffix}"
     return {
-        "schema_version": "source_event.v1",
-        "event_id": f"evt-tower-{suffix}",
+        "raw_event_id": f"raw-tower-{suffix}",
         "idempotency_key": f"dcp:projectPages:杆塔信息:{api_name}:tower-{suffix}",
         "source_system": "dcp",
-        "source_event_type": "dcp.record",
-        "event_granularity": "record",
         "source_record_id": f"tower-{suffix}",
         "source_record_hash": f"hash-tower-{suffix}",
         "occurred_at": "2026-05-03T08:30:00+08:00",
@@ -189,14 +163,12 @@ def _tower_event(
     }
 
 
-def test_station_source_event_to_sandbox_skeleton_flow():
+def test_station_batch_record_to_sandbox_skeleton_flow():
     store = _make_store()
     client = _client(store)
     event = _station_event()
 
-    ingestion = client.post("/ingestion/v1/events", json={"events": [event]})
-    assert ingestion.status_code == 200
-    assert ingestion.json()["accepted"] == 1
+    seed_test_records(store, "station", [event])
 
     processing = client.post("/processing/v1/run", json={"dataset_key": "station"})
     assert processing.status_code == 200
@@ -247,14 +219,12 @@ def test_station_source_event_to_sandbox_skeleton_flow():
     ]
 
 
-def test_daily_meeting_source_event_to_work_point_and_summary():
+def test_daily_meeting_batch_record_to_work_point_and_summary():
     store = _make_store()
     client = _client(store)
     event = _daily_meeting_event()
 
-    ingestion = client.post("/ingestion/v1/events", json={"events": [event]})
-    assert ingestion.status_code == 200
-    assert ingestion.json()["accepted"] == 1
+    seed_test_records(store, "daily_meeting", [event])
 
     processing = client.post(
         "/processing/v1/run", json={"dataset_key": "daily_meeting"}
@@ -308,8 +278,7 @@ def test_daily_meeting_same_id_on_different_dates_creates_two_work_points():
     second = _daily_meeting_event("same-id-2", work_date="2026-05-04")
     first["payload"]["raw"]["id"] = "meeting-same"
     second["payload"]["raw"]["id"] = "meeting-same"
-    store.save_raw_event(first, dataset_key="daily_meeting")
-    store.save_raw_event(second, dataset_key="daily_meeting")
+    seed_test_records(store, "daily_meeting", [first, second])
 
     result = NormalizerRunner(store).run("daily_meeting")
 
@@ -328,8 +297,7 @@ def test_sandbox_summary_filters_by_date_and_defaults_to_latest_date():
     second = _daily_meeting_event("date-2", work_date="2026-05-04")
     first["payload"]["raw"]["projectName"] = "三号作业"
     second["payload"]["raw"]["projectName"] = "四号作业"
-    store.save_raw_event(first, dataset_key="daily_meeting")
-    store.save_raw_event(second, dataset_key="daily_meeting")
+    seed_test_records(store, "daily_meeting", [first, second])
     NormalizerRunner(store).run("daily_meeting")
 
     filtered = client.get("/api/v1/sandbox/map/summary?date=2026-05-03")
@@ -365,9 +333,7 @@ def test_sandbox_dates_returns_daily_meeting_dates_in_ascending_order():
     first["payload"]["raw"]["id"] = "meeting-date-list-1"
     second["payload"]["raw"]["id"] = "meeting-date-list-2"
     third["payload"]["raw"]["id"] = "meeting-date-list-3"
-    store.save_raw_event(first, dataset_key="daily_meeting")
-    store.save_raw_event(second, dataset_key="daily_meeting")
-    store.save_raw_event(third, dataset_key="daily_meeting")
+    seed_test_records(store, "daily_meeting", [first, second, third])
     NormalizerRunner(store).run("daily_meeting")
 
     response = client.get("/api/v1/sandbox/dates")
@@ -383,7 +349,7 @@ def test_sandbox_dates_returns_daily_meeting_dates_in_ascending_order():
 def test_sandbox_dates_returns_empty_when_no_work_points_exist():
     store = _make_store()
     client = _client(store)
-    store.save_raw_event(_station_event("dates-station-only"), dataset_key="station")
+    seed_test_records(store, "station", [_station_event("dates-station-only")])
     NormalizerRunner(store).run("station")
 
     response = client.get("/api/v1/sandbox/dates")
@@ -404,7 +370,7 @@ def test_daily_meeting_maps_current_monitor_fields():
     raw["reAssessmentRiskLevel"] = "high"
     raw["currentConstructionStatus"] = "paused"
     raw["buildUnitName"] = "长沙"
-    store.save_raw_event(event, dataset_key="daily_meeting")
+    seed_test_records(store, "daily_meeting", [event])
 
     result = NormalizerRunner(store).run("daily_meeting")
 
@@ -423,7 +389,7 @@ def test_daily_meeting_normalizes_invalid_count_and_unknown_values():
     raw["currentConstrHeadcount"] = "not-a-number"
     raw["reAssessmentRiskLevel"] = "very risky"
     raw["currentConstructionStatus"] = "strange status"
-    store.save_raw_event(event, dataset_key="daily_meeting")
+    seed_test_records(store, "daily_meeting", [event])
 
     result = NormalizerRunner(store).run("daily_meeting")
 
@@ -437,7 +403,7 @@ def test_daily_meeting_normalizes_invalid_count_and_unknown_values():
 def test_daily_meeting_normalizes_datetime_work_date():
     store = _make_store()
     event = _daily_meeting_event("datetime-date", work_date="2026-05-03 18:20:30")
-    store.save_raw_event(event, dataset_key="daily_meeting")
+    seed_test_records(store, "daily_meeting", [event])
 
     result = NormalizerRunner(store).run("daily_meeting")
 
@@ -454,7 +420,7 @@ def test_daily_meeting_normalizes_epoch_millis_work_date():
         datetime.fromisoformat("2026-05-03T12:00:00+00:00").timestamp() * 1000
     )
     event = _daily_meeting_event("epoch-date", work_date=epoch_ms)
-    store.save_raw_event(event, dataset_key="daily_meeting")
+    seed_test_records(store, "daily_meeting", [event])
 
     result = NormalizerRunner(store).run("daily_meeting")
 
@@ -466,10 +432,12 @@ def test_daily_meeting_normalizes_epoch_millis_work_date():
 
 def test_daily_meeting_numeric_risk_levels_are_stable_values():
     store = _make_store()
+    events = []
     for risk_level in [1, "2", 3, "4"]:
         event = _daily_meeting_event(f"risk-{risk_level}")
         event["payload"]["raw"]["riskLevel"] = risk_level
-        store.save_raw_event(event, dataset_key="daily_meeting")
+        events.append(event)
+    seed_test_records(store, "daily_meeting", events)
 
     result = NormalizerRunner(store).run("daily_meeting")
 
@@ -497,10 +465,12 @@ def test_daily_meeting_named_risk_levels_follow_monitor_scale():
         "低风险": "4",
         "一般风险": "4",
     }
+    events = []
     for source_value in cases:
         event = _daily_meeting_event(f"risk-name-{source_value}")
         event["payload"]["raw"]["riskLevel"] = source_value
-        store.save_raw_event(event, dataset_key="daily_meeting")
+        events.append(event)
+    seed_test_records(store, "daily_meeting", events)
 
     result = NormalizerRunner(store).run("daily_meeting")
 
@@ -522,9 +492,9 @@ def test_invalid_coordinates_are_skipped_by_dcp_normalizers():
     daily["payload"]["raw"]["toolBoxTalkLongitude"] = "nan"
     tower["payload"]["raw"]["longitudeEdit"] = "nan"
     station["payload"]["raw"]["longitude"] = "nan"
-    store.save_raw_event(daily, dataset_key="daily_meeting")
-    store.save_raw_event(tower, dataset_key="tower")
-    store.save_raw_event(station, dataset_key="station")
+    seed_test_records(store, "daily_meeting", [daily])
+    seed_test_records(store, "tower", [tower])
+    seed_test_records(store, "station", [station])
 
     daily_result = NormalizerRunner(store).run("daily_meeting")
     tower_result = NormalizerRunner(store).run("tower")
@@ -554,11 +524,9 @@ def test_non_hunan_coordinates_do_not_reach_sandbox_apis():
     station["payload"]["raw"]["longitude"] = "116.391"
     station["payload"]["raw"]["latitude"] = "39.907"
 
-    ingestion = client.post(
-        "/ingestion/v1/events", json={"events": [daily, tower, station]}
-    )
-    assert ingestion.status_code == 200
-    assert ingestion.json()["accepted"] == 3
+    seed_test_records(store, "daily_meeting", [daily])
+    seed_test_records(store, "tower", [tower])
+    seed_test_records(store, "station", [station])
 
     daily_result = NormalizerRunner(store).run("daily_meeting")
     tower_result = NormalizerRunner(store).run("tower")
@@ -591,11 +559,9 @@ def test_strict_hunan_boundary_filters_formerly_loose_coordinates():
     station["payload"]["raw"]["longitude"] = "108.2"
     station["payload"]["raw"]["latitude"] = "28.0"
 
-    ingestion = client.post(
-        "/ingestion/v1/events", json={"events": [daily, tower, station]}
-    )
-    assert ingestion.status_code == 200
-    assert ingestion.json()["accepted"] == 3
+    seed_test_records(store, "daily_meeting", [daily])
+    seed_test_records(store, "tower", [tower])
+    seed_test_records(store, "station", [station])
 
     daily_result = NormalizerRunner(store).run("daily_meeting")
     tower_result = NormalizerRunner(store).run("tower")
@@ -615,7 +581,7 @@ def test_strict_hunan_boundary_filters_formerly_loose_coordinates():
     assert skeleton["towers"] == []
 
 
-def test_downloader_realistic_source_events_feed_sandbox_apis():
+def test_downloader_realistic_batch_records_feed_sandbox_apis():
     store = _make_store()
     client = _client(store)
     daily = _daily_meeting_event("real-daily", work_date="2026-05-05")
@@ -648,12 +614,9 @@ def test_downloader_realistic_source_events_feed_sandbox_apis():
         latitude="28.2147",
     )
 
-    ingestion = client.post(
-        "/ingestion/v1/events",
-        json={"events": [daily, tower, station]},
-    )
-    assert ingestion.status_code == 200
-    assert ingestion.json()["accepted"] == 3
+    seed_test_records(store, "daily_meeting", [daily])
+    seed_test_records(store, "tower", [tower])
+    seed_test_records(store, "station", [station])
 
     assert NormalizerRunner(store).run("daily_meeting")["processed"] == 1
     assert NormalizerRunner(store).run("tower")["processed"] == 1
@@ -682,14 +645,12 @@ def test_downloader_realistic_source_events_feed_sandbox_apis():
     assert "raw" not in body["stations"][0]
 
 
-def test_tower_details_source_event_to_tower_canonical():
+def test_tower_details_batch_record_to_tower_canonical():
     store = _make_store()
     client = _client(store)
     event = _tower_event()
 
-    ingestion = client.post("/ingestion/v1/events", json={"events": [event]})
-    assert ingestion.status_code == 200
-    assert ingestion.json()["accepted"] == 1
+    seed_test_records(store, "tower", [event])
 
     result = NormalizerRunner(store).run("tower")
 
@@ -700,7 +661,7 @@ def test_tower_details_source_event_to_tower_canonical():
     entity = entities[0]
     assert entity["entity_key"] == "dcp:tower:SP-TOWER-001:BS-001:T-001"
     assert entity["attributes"]["tower_id"] == "tower-001"
-    assert entity["attributes"]["legacy_entity_key"] == "dcp:tower:tower-001"
+    assert entity["attributes"]["dcp_entity_key_fallback"] == "dcp:tower:tower-001"
     assert entity["attributes"]["longitude"] == 112.9451
     assert entity["attributes"]["latitude"] == 28.2311
     assert entity["attributes"]["raw"]["rawOnly"] == "not exposed"
@@ -709,7 +670,7 @@ def test_tower_details_source_event_to_tower_canonical():
 def test_tower_entity_key_falls_back_when_raw_id_missing():
     store = _make_store()
     event = _tower_event("fallback", include_id=False)
-    store.save_raw_event(event, dataset_key="tower")
+    seed_test_records(store, "tower", [event])
 
     result = NormalizerRunner(store).run("tower")
 
@@ -726,9 +687,7 @@ def test_tower_single_projects_is_skipped_by_tower_normalizer():
     client = _client(store)
     event = _tower_event("single-project", api_name="tower_single_projects")
 
-    ingestion = client.post("/ingestion/v1/events", json={"events": [event]})
-    assert ingestion.status_code == 200
-    assert ingestion.json()["accepted"] == 1
+    seed_test_records(store, "tower", [event])
 
     result = NormalizerRunner(store).run("tower")
 
@@ -744,12 +703,8 @@ def test_sandbox_skeleton_returns_towers_and_stations_without_raw():
     station_event = _station_event()
     tower_event = _tower_event()
 
-    assert client.post("/ingestion/v1/events", json={"events": [station_event]}).json()[
-        "accepted"
-    ] == 1
-    assert client.post("/ingestion/v1/events", json={"events": [tower_event]}).json()[
-        "accepted"
-    ] == 1
+    seed_test_records(store, "station", [station_event])
+    seed_test_records(store, "tower", [tower_event])
     assert NormalizerRunner(store).run("station")["processed"] == 1
     assert NormalizerRunner(store).run("tower")["processed"] == 1
 
@@ -775,14 +730,14 @@ def test_tower_entity_key_uses_scoped_format_even_when_raw_id_exists():
     event["payload"]["raw"]["singleProjectCode"] = "S01"
     event["payload"]["raw"]["biddingSectionCode"] = "B01"
     event["payload"]["raw"]["towerNo"] = "G1"
-    store.save_raw_event(event, dataset_key="tower")
+    seed_test_records(store, "tower", [event])
 
     result = NormalizerRunner(store).run("tower")
 
     assert result["processed"] == 1
     entity = store.list_canonical_entities(entity_type="tower", dataset_key="tower")[0]
     assert entity["entity_key"] == "dcp:tower:S01:B01:G1"
-    assert entity["attributes"]["legacy_entity_key"] == "dcp:tower:tower-scoped-with-id"
+    assert entity["attributes"]["dcp_entity_key_fallback"] == "dcp:tower:tower-scoped-with-id"
 
 
 def test_processing_run_supports_station_from_registry():
@@ -1004,7 +959,7 @@ def test_processing_run_monitor_default_does_not_run_line_or_year(monkeypatch):
 def test_station_entity_key_prefers_single_project_code():
     store = _make_store()
     event = _station_event(suffix="key-preferred", station_id="coord-001")
-    store.save_raw_event(event, dataset_key="station")
+    seed_test_records(store, "station", [event])
 
     result = NormalizerRunner(store).run("station")
 
@@ -1018,7 +973,7 @@ def test_station_entity_key_falls_back_to_coordinate_id_without_single_project_c
     store = _make_store()
     event = _station_event(suffix="key-fallback", station_id="coord-fallback")
     del event["payload"]["raw"]["singleProjectCode"]
-    store.save_raw_event(event, dataset_key="station")
+    seed_test_records(store, "station", [event])
 
     result = NormalizerRunner(store).run("station")
 
@@ -1039,7 +994,7 @@ def test_station_context_can_supply_project_scoping_when_raw_lacks_codes():
         "single_project_code": "SP-CTX",
         "bidding_section_code": "BS-CTX",
     }
-    store.save_raw_event(event, dataset_key="station")
+    seed_test_records(store, "station", [event])
 
     result = NormalizerRunner(store).run("station")
 
@@ -1061,7 +1016,7 @@ def test_tower_context_can_supply_scoped_identity_when_raw_lacks_codes():
         "single_project_code": "SP-TOWER-CTX",
         "bidding_section_code": "BS-TOWER-CTX",
     }
-    store.save_raw_event(event, dataset_key="tower")
+    seed_test_records(store, "tower", [event])
 
     result = NormalizerRunner(store).run("tower")
 
@@ -1084,7 +1039,7 @@ def test_daily_meeting_context_can_supply_missing_hierarchy_codes():
         "single_project_code": "SP-DAILY-CTX",
         "bidding_section_code": "BS-DAILY-CTX",
     }
-    store.save_raw_event(event, dataset_key="daily_meeting")
+    seed_test_records(store, "daily_meeting", [event])
 
     result = NormalizerRunner(store).run("daily_meeting")
 
@@ -1097,10 +1052,12 @@ def test_daily_meeting_context_can_supply_missing_hierarchy_codes():
 
 def test_station_normalizer_processes_more_than_default_page_size():
     store = _make_store()
+    events = []
     for index in range(1001):
         event = _station_event(suffix=f"{index:04d}")
         event["payload"]["raw"]["singleProjectCode"] = f"SP-{index:04d}"
-        store.save_raw_event(event, dataset_key="station")
+        events.append(event)
+    seed_test_records(store, "station", events)
 
     result = NormalizerRunner(store).run("station", batch_size=100)
 
@@ -1125,8 +1082,7 @@ def test_older_station_raw_event_does_not_overwrite_newer_current_entity():
         latitude="27.9",
         collected_at="2026-05-03T21:30:12+08:00",
     )
-    store.save_raw_event(newer, dataset_key="station")
-    store.save_raw_event(older, dataset_key="station")
+    seed_test_records(store, "station", [newer, older])
 
     result = NormalizerRunner(store).run("station")
 
@@ -1194,7 +1150,7 @@ def test_canonical_upsert_compares_latest_collected_at_epoch_not_strings():
 def test_incremental_mode_second_run_does_not_reprocess_raw_events():
     store = _make_store()
     event = _station_event(suffix="incremental")
-    store.save_raw_event(event, dataset_key="station")
+    seed_test_records(store, "station", [event])
 
     first = NormalizerRunner(store).run("station")
     second = NormalizerRunner(store).run("station")
@@ -1211,7 +1167,7 @@ def test_incremental_mode_second_run_does_not_reprocess_raw_events():
 def test_full_mode_rescans_all_raw_events():
     store = _make_store()
     event = _station_event(suffix="full")
-    store.save_raw_event(event, dataset_key="station")
+    seed_test_records(store, "station", [event])
 
     first = NormalizerRunner(store).run("station")
     second = NormalizerRunner(store).run("station", mode="full")
@@ -1227,8 +1183,8 @@ def test_normalizer_state_records_last_raw_event_id():
     first_event = _station_event(suffix="state-1")
     second_event = _station_event(suffix="state-2")
     second_event["payload"]["raw"]["singleProjectCode"] = "SP-STATE-2"
-    store.save_raw_event(first_event, dataset_key="station")
-    _, second_raw_event_id = store.save_raw_event(second_event, dataset_key="station")
+    inserted = seed_test_records(store, "station", [first_event, second_event])
+    second_raw_event_id = inserted["raw_event_ids"][second_event["raw_event_id"]]
 
     result = NormalizerRunner(store).run("station", batch_size=1)
 
@@ -1242,7 +1198,7 @@ def test_normalizer_state_records_last_raw_event_id():
 def test_normalizer_run_saves_current_version():
     store = _make_store()
     event = _station_event(suffix="state-version")
-    store.save_raw_event(event, dataset_key="station")
+    seed_test_records(store, "station", [event])
 
     result = NormalizerRunner(store).run("station")
 
@@ -1254,7 +1210,7 @@ def test_normalizer_run_saves_current_version():
 def test_normalizer_version_change_reprocesses_from_zero(monkeypatch):
     store = _make_store()
     event = _station_event(suffix="version-change")
-    store.save_raw_event(event, dataset_key="station")
+    seed_test_records(store, "station", [event])
 
     first = NormalizerRunner(store).run("station")
     handler = normalizer_runner.NORMALIZERS["station"]["handler"]
@@ -1284,8 +1240,8 @@ def test_incremental_checkpoint_advances_past_skipped_non_target_api():
     )
     processed_event = _station_event(suffix="after-skip")
     processed_event["payload"]["raw"]["singleProjectCode"] = "SP-AFTER-SKIP"
-    store.save_raw_event(skipped_event, dataset_key="station")
-    _, processed_raw_event_id = store.save_raw_event(processed_event, dataset_key="station")
+    inserted = seed_test_records(store, "station", [skipped_event, processed_event])
+    processed_raw_event_id = inserted["raw_event_ids"][processed_event["raw_event_id"]]
 
     result = NormalizerRunner(store).run("station")
 

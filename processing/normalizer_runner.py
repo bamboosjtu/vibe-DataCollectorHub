@@ -1,4 +1,4 @@
-"""Manual normalizer runner for raw SourceEvent data."""
+"""Manual normalizer runner for MVP raw_event data."""
 
 from typing import Any
 

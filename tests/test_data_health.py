@@ -18,6 +18,7 @@ from health.job_health import get_job_health
 from health.summary import get_health_summary
 from processing.normalizer_runner import NormalizerRunner
 from storage.sqlite_store import SQLiteStore
+from conftest import seed_test_records
 
 
 def _make_store() -> SQLiteStore:
@@ -53,12 +54,9 @@ def _event(
     source_file: str | None = None,
 ) -> dict:
     return {
-        "schema_version": "source_event.v1",
-        "event_id": f"evt-{dataset_key}-{suffix}",
+        "raw_event_id": f"raw-{dataset_key}-{suffix}",
         "idempotency_key": f"dcp:{collection}:{page_name}:{api_name}:{suffix}",
         "source_system": "dcp",
-        "source_event_type": "dcp.record",
-        "event_granularity": "record",
         "source_record_id": f"record-{suffix}",
         "source_record_hash": f"hash-{suffix}",
         "occurred_at": collected_at,
@@ -81,137 +79,146 @@ def _event(
 
 
 def _seed_health_data(store: SQLiteStore) -> None:
-    store.save_raw_event(
-        _event(
-            suffix="preconstruction",
-            dataset_key="project_preconstruction",
-            collection="projectPages",
-            page_name="项目前期成果",
-            api_name="preconstruction_results_detail",
-            raw={
-                "prjCode": "PRJ-001",
-                "prjName": "项目一",
-                "sinList": [
-                    {
-                        "singleProjectCode": "SP-001",
-                        "singleProjectName": "单项一",
-                        "bidSectList": [
-                            {
-                                "biddingSectionCode": "BS-001",
-                                "biddingSectionName": "标段一",
-                            }
-                        ],
-                    }
-                ],
-            },
-        ),
-        dataset_key="project_preconstruction",
+    seed_test_records(
+        store,
+        "project_preconstruction",
+        [
+            _event(
+                suffix="preconstruction",
+                dataset_key="project_preconstruction",
+                collection="projectPages",
+                page_name="项目前期成果",
+                api_name="preconstruction_results_detail",
+                raw={
+                    "prjCode": "PRJ-001",
+                    "prjName": "项目一",
+                    "sinList": [
+                        {
+                            "singleProjectCode": "SP-001",
+                            "singleProjectName": "单项一",
+                            "bidSectList": [
+                                {
+                                    "biddingSectionCode": "BS-001",
+                                    "biddingSectionName": "标段一",
+                                }
+                            ],
+                        }
+                    ],
+                },
+            )
+        ],
     )
-    store.save_raw_event(
-        _event(
-            suffix="section-scoped",
-            dataset_key="line_section",
-            collection="projectPages",
-            page_name="区段划分",
-            api_name="section_details",
-            raw={
-                "id": "LS-001",
-                "sectionName": "一区段",
-                "sectionVo": {"towerNoList": [{"towerNo": "G1"}]},
-            },
-            context={
-                "project_code": "PRJ-001",
-                "single_project_code": "SP-001",
-                "bidding_section_code": "BS-001",
-                "line_section_id": "LS-001",
-                "line_section_name": "一区段",
-            },
-        ),
-        dataset_key="line_section",
+    seed_test_records(
+        store,
+        "line_section",
+        [
+            _event(
+                suffix="section-scoped",
+                dataset_key="line_section",
+                collection="projectPages",
+                page_name="区段划分",
+                api_name="section_details",
+                raw={
+                    "id": "LS-001",
+                    "sectionName": "一区段",
+                    "sectionVo": {"towerNoList": [{"towerNo": "G1"}]},
+                },
+                context={
+                    "project_code": "PRJ-001",
+                    "single_project_code": "SP-001",
+                    "bidding_section_code": "BS-001",
+                    "line_section_id": "LS-001",
+                    "line_section_name": "一区段",
+                },
+            ),
+            _event(
+                suffix="section-unscoped",
+                dataset_key="line_section",
+                collection="projectPages",
+                page_name="区段划分",
+                api_name="section_details",
+                raw={
+                    "id": "LS-002",
+                    "sectionName": "二区段",
+                    "sectionVo": {"towerNoList": [{"towerNo": "G2"}]},
+                },
+            ),
+        ],
     )
-    store.save_raw_event(
-        _event(
-            suffix="section-unscoped",
-            dataset_key="line_section",
-            collection="projectPages",
-            page_name="区段划分",
-            api_name="section_details",
-            raw={
-                "id": "LS-002",
-                "sectionName": "二区段",
-                "sectionVo": {"towerNoList": [{"towerNo": "G2"}]},
-            },
-        ),
-        dataset_key="line_section",
+    seed_test_records(
+        store,
+        "tower",
+        [
+            _event(
+                suffix="tower",
+                dataset_key="tower",
+                collection="projectPages",
+                page_name="杆塔信息",
+                api_name="tower_details",
+                raw={
+                    "singleProjectCode": "SP-001",
+                    "biddingSectionCode": "BS-001",
+                    "towerNo": "G1",
+                    "longitudeEdit": "112.9451",
+                    "latitudeEdit": "28.2311",
+                },
+                context={"project_code": "PRJ-001"},
+            )
+        ],
     )
-    store.save_raw_event(
-        _event(
-            suffix="tower",
-            dataset_key="tower",
-            collection="projectPages",
-            page_name="杆塔信息",
-            api_name="tower_details",
-            raw={
-                "singleProjectCode": "SP-001",
-                "biddingSectionCode": "BS-001",
-                "towerNo": "G1",
-                "longitudeEdit": "112.9451",
-                "latitudeEdit": "28.2311",
-            },
-            context={"project_code": "PRJ-001"},
-        ),
-        dataset_key="tower",
+    seed_test_records(
+        store,
+        "station",
+        [
+            _event(
+                suffix="station",
+                dataset_key="station",
+                collection="projectPages",
+                page_name="变电站坐标",
+                api_name="substation_coordinates",
+                raw={
+                    "id": "station-001",
+                    "longitude": "112.9279",
+                    "latitude": "28.2147",
+                },
+                context={
+                    "project_code": "PRJ-001",
+                    "single_project_code": "SP-001",
+                },
+            )
+        ],
     )
-    store.save_raw_event(
-        _event(
-            suffix="station",
-            dataset_key="station",
-            collection="projectPages",
-            page_name="变电站坐标",
-            api_name="substation_coordinates",
-            raw={
-                "id": "station-001",
-                "longitude": "112.9279",
-                "latitude": "28.2147",
-            },
-            context={
-                "project_code": "PRJ-001",
-                "single_project_code": "SP-001",
-            },
-        ),
-        dataset_key="station",
-    )
-    store.save_raw_event(
-        _event(
-            suffix="daily-2026-05-06",
-            dataset_key="daily_meeting",
-            collection="safePages",
-            page_name="meetingListAdmin",
-            api_name="queryToolBoxTalkListPagePc",
-            raw={
-                "id": "meeting-001",
-                "toolBoxTalkLongitude": "112.9388",
-                "toolBoxTalkLatitude": "28.2282",
-            },
-            source_file="../data/safe/daily_meeting/2026-05-06.json",
-        ),
-        dataset_key="daily_meeting",
-    )
-    store.save_raw_event(
-        _event(
-            suffix="daily-2026-05-07",
-            dataset_key="daily_meeting",
-            collection="safePages",
-            page_name="meetingListAdmin",
-            api_name="queryToolBoxTalkListPagePc",
-            raw={
-                "id": "meeting-002",
-                "toolBoxTalkLongitude": "112.9388",
-                "toolBoxTalkLatitude": "28.2282",
-            },
-            source_file="../data/safe/daily_meeting/2026-05-07.json",
-        ),
-        dataset_key="daily_meeting",
+    seed_test_records(
+        store,
+        "daily_meeting",
+        [
+            _event(
+                suffix="daily-2026-05-06",
+                dataset_key="daily_meeting",
+                collection="safePages",
+                page_name="meetingListAdmin",
+                api_name="queryToolBoxTalkListPagePc",
+                raw={
+                    "id": "meeting-001",
+                    "toolBoxTalkLongitude": "112.9388",
+                    "toolBoxTalkLatitude": "28.2282",
+                },
+                source_file="../data/safe/daily_meeting/2026-05-06.json",
+            ),
+            _event(
+                suffix="daily-2026-05-07",
+                dataset_key="daily_meeting",
+                collection="safePages",
+                page_name="meetingListAdmin",
+                api_name="queryToolBoxTalkListPagePc",
+                raw={
+                    "id": "meeting-002",
+                    "toolBoxTalkLongitude": "112.9388",
+                    "toolBoxTalkLatitude": "28.2282",
+                },
+                source_file="../data/safe/daily_meeting/2026-05-07.json",
+            ),
+        ],
     )
 
     NormalizerRunner(store).run("project_hierarchy", mode="full")

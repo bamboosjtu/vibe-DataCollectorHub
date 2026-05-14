@@ -52,6 +52,16 @@ def test_daily_meeting_ingestion_batch_writes_mvp_raw_layer() -> None:
     assert store.count_table_rows("collection_checkpoints") == 1
 
 
+def test_legacy_events_route_is_not_registered() -> None:
+    store = _make_store()
+    response = _client(store).post(
+        "/ingestion/v1/events",
+        json={"events": []},
+    )
+
+    assert response.status_code == 404
+
+
 def test_daily_meeting_ingestion_batch_skips_duplicate_raw_events() -> None:
     store = _make_store()
     client = _client(store)

@@ -174,7 +174,7 @@ def get_raw_data(plugin_filter, limit):
 
 @st.cache_data(ttl=5)
 def get_raw_events(dataset_filter, limit):
-    """Get raw SourceEvent rows (cached)."""
+    """Get MVP raw_event rows (cached)."""
     conn = get_connection()
     try:
         if dataset_filter == "All":
@@ -541,7 +541,7 @@ elif page == "🔌 Plugins":
 # Raw Data Page
 elif page == "📄 Raw Data":
     st.title("📄 Raw Data")
-    st.info("raw_data stores embedded pipeline collector output. raw_events stores SourceEvent ingestion payloads.")
+    st.info("raw_data stores embedded pipeline collector output. raw_events stores one original business record per MVP ingestion batch row.")
     st.markdown("---")
 
     # Filter by plugin
